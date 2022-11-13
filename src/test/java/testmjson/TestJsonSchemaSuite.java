@@ -32,7 +32,7 @@ public class TestJsonSchemaSuite {
   @Parameters
   public static Collection<Object[]> data() {
     final List<Object[]> tests = new ArrayList<Object[]>();
-    for (final Map.Entry<String, String> test : TestSchemas.testResources("suite").entrySet()) {
+    for (final Map.Entry<String, String> test : TestSchemas.testResources("src/test/resources/suite/draft2020-12").entrySet()) {
       Json set = Json.read(test.getValue());
       if (!set.isArray()) {
         set = Json.array().add(set);

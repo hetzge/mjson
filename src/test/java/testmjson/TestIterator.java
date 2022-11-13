@@ -75,7 +75,6 @@ public class TestIterator {
   }
 
   @Test
-  @SuppressWarnings("unchecked")
   public void testObject() {
     final Json o1 = object("p", 1, "p2", "p2value");
     final Iterator<Entry<String, Json>> iter = o1.asJsonMap().entrySet().iterator();

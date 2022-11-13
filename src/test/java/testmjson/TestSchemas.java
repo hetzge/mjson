@@ -6,9 +6,7 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URISyntaxException;
-import java.net.URL;
 import java.util.ArrayList;
-import java.util.Enumeration;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -19,23 +17,25 @@ import org.junit.Test;
 import mjson.Json;
 
 /**
- * 
+ *
  * @author Borislav Iordanov
  *
  */
 public class TestSchemas {
   public static byte[] getBytesFromStream(InputStream is, boolean close) throws IOException {
-    ByteArrayOutputStream out = new ByteArrayOutputStream();
+    final ByteArrayOutputStream out = new ByteArrayOutputStream();
     try {
-      byte[] A = new byte[4096];
+      final byte[] A = new byte[4096];
       // Read in the bytes
-      for (int cnt = is.read(A); cnt > -1; cnt = is.read(A))
+      for (int cnt = is.read(A); cnt > -1; cnt = is.read(A)) {
         out.write(A, 0, cnt);
+      }
       return out.toByteArray();
       // Close the input stream and return bytes
     } finally {
-      if (close)
+      if (close) {
         is.close();
+      }
     }
   }
 
@@ -44,62 +44,55 @@ public class TestSchemas {
     try {
       in = new FileInputStream(file);
       return new String(getBytesFromStream(in, true));
-    } catch (IOException e) {
+    } catch (final IOException e) {
       throw new RuntimeException(e);
     } finally {
-      if (in != null)
+      if (in != null) {
         try {
           in.close();
-        } catch (Throwable t) {
+        } catch (final Throwable t) {
         }
+      }
     }
   }
 
   public static String readTextResource(String resource) {
-    InputStream in = TestSchemas.class.getResourceAsStream(resource);
-    if (in == null)
+    final InputStream in = TestSchemas.class.getResourceAsStream(resource);
+    if (in == null) {
       return null;
-    else
+    } else {
       try {
         return new String(getBytesFromStream(in, true));
-      } catch (IOException e) {
+      } catch (final IOException e) {
         throw new RuntimeException(e);
       }
+    }
   }
 
   // this won't work for jar files probably, for test classes&resources are
   // usually not bundled
   // in jars...
-  public static Map<String, String> testResources(String name) {
-    HashMap<String, String> L = new HashMap<String, String>();
-    try {
-      Enumeration<URL> en = TestSchemas.class.getClassLoader().getResources(name);
-      if (en.hasMoreElements()) {
-        URL resource = en.nextElement();
-        File resourceFile = new File(resource.toURI());
-        if (resourceFile.isDirectory())
-          for (String nested : resourceFile.list()) {
-            File nestedFile = new File(resourceFile, nested);
-            if (nestedFile.isDirectory())
-              L.putAll(testResources(nested));
-            else
-              L.put(nestedFile.getPath(), readFile(nestedFile));
-          }
-        else
-          L.put(resourceFile.getPath(), readFile(resourceFile));
-//			    File[] files = resourceFile.listFiles();
-//			    String[] filenames = fileMetaInf.list();
-      }
-    } catch (Exception ex) {
-      throw new RuntimeException(ex);
+  public static Map<String, String> testResources(String path) {
+    final HashMap<String, String> result = new HashMap<String, String>();
+    final File root = new File(path);
+    final File[] list = root.listFiles();
+    if (list == null) {
+      return result;
     }
-    return L;
+    for (final File f : list) {
+      if (f.isDirectory()) {
+        result.putAll(testResources(f.getAbsolutePath()));
+      } else {
+        result.put(f.getAbsolutePath(), readFile(f));
+      }
+    }
+    return result;
   }
 
   /**
    * Test a schema against a document that should validate and then against a
    * document that should fail to validate.
-   * 
+   *
    * @param schema
    * @param correct
    * @param incorrect
@@ -111,7 +104,7 @@ public class TestSchemas {
   /**
    * Test a schema against a document that should validate and then against a
    * document that should fail to validate.
-   * 
+   *
    * @param schema
    * @param correct
    * @param incorrect
@@ -152,9 +145,9 @@ public class TestSchemas {
 
   @Test
   public void testSchemaWithDefs() throws URISyntaxException {
-    Json.Schema schema = Json.schema(TU.resource("/schemas_data/schema_with_defs.json").toURI());
-    Json data = Json.array(Json.object());
-    Json result = schema.validate(data);
+    final Json.Schema schema = Json.schema(TU.resource("/schemas_data/schema_with_defs.json").toURI());
+    final Json data = Json.array(Json.object());
+    final Json result = schema.validate(data);
     if (!result.is("ok", true)) {
       System.err.println(result.at("errors"));
       Assert.fail();
@@ -163,9 +156,9 @@ public class TestSchemas {
 
   @Test
   public void testOpenCirmSchema() throws URISyntaxException {
-    Json.Schema schema = Json.schema(TU.resource("/schemas_data/json_case_schema.json").toURI());
-    Json data = Json.read(TU.resource("/schemas_data/json_data.json"));
-    Json result = schema.validate(data);
+    final Json.Schema schema = Json.schema(TU.resource("/schemas_data/json_case_schema.json").toURI());
+    final Json data = Json.read(TU.resource("/schemas_data/json_data.json"));
+    final Json result = schema.validate(data);
     if (!result.is("ok", true)) {
       System.err.println(result.at("errors"));
       Assert.fail();
@@ -173,17 +166,19 @@ public class TestSchemas {
   }
 
   public Object[] addTests() {
-    List<TestJsonSchemaSuite> tests = new ArrayList<TestJsonSchemaSuite>();
-    for (Map.Entry<String, String> test : testResources("suite").entrySet()) {
+    final List<TestJsonSchemaSuite> tests = new ArrayList<TestJsonSchemaSuite>();
+    for (final Map.Entry<String, String> test : testResources("suite").entrySet()) {
       Json set = Json.read(test.getValue());
-      if (!set.isArray())
+      if (!set.isArray()) {
         set = Json.array().add(set);
-      for (Json one : set.asJsonList()) {
+      }
+      for (final Json one : set.asJsonList()) {
         try {
-          Json.Schema schema = Json.schema(one.at("schema"));
-          for (Json t : one.at("tests").asJsonList())
+          final Json.Schema schema = Json.schema(one.at("schema"));
+          for (final Json t : one.at("tests").asJsonList()) {
             tests.add(new TestJsonSchemaSuite(test.getKey(), t.at("description", "***").asString() + "/" + one.at("description", "---").asString(), schema, t.at("data"), t.at("valid", true).asBoolean()));
-        } catch (Throwable t) {
+          }
+        } catch (final Throwable t) {
           throw new RuntimeException("While adding tests from file " + test.getKey() + " - " + one, t);
         }
       }
@@ -198,15 +193,15 @@ public class TestSchemas {
 //		Json.schema(Json.object(
 //            "$ref","https://raw.githubusercontent.com/json-schema/JSON-Schema-Test-Suite/develop/remotes/subSchemas.json#/refToInteger"
 //        ));
-    Json set = Json.read(readTextResource("/suite/ref.json"));
-    for (Json one : set.asJsonList()) {
-      Json.Schema schema = Json.schema(one.at("schema"));
+    final Json set = Json.read(readTextResource("/suite/ref.json"));
+    for (final Json one : set.asJsonList()) {
+      final Json.Schema schema = Json.schema(one.at("schema"));
       // System.out.println(one.at("schema"));
-      for (Json t : one.at("tests").asJsonList()) {
-        TestJsonSchemaSuite thetest = new TestJsonSchemaSuite("properties", t.at("description", "***").asString() + "/" + one.at("description", "---").asString(), schema, t.at("data"), t.at("valid", true).asBoolean());
+      for (final Json t : one.at("tests").asJsonList()) {
+        final TestJsonSchemaSuite thetest = new TestJsonSchemaSuite("properties", t.at("description", "***").asString() + "/" + one.at("description", "---").asString(), schema, t.at("data"), t.at("valid", true).asBoolean());
         try {
           thetest.doTest();
-        } catch (Throwable ex) {
+        } catch (final Throwable ex) {
           System.out.println("Failed at " + t);
           ex.printStackTrace();
           System.exit(-1);

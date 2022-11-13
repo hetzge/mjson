@@ -284,7 +284,9 @@ import java.util.regex.Pattern;
  * @version 2.0.0
  */
 public class Json implements java.io.Serializable, Iterable<Json> {
+
   private static final long serialVersionUID = 1L;
+  private static final int MAX_CHARACTERS = 200;
 
   /**
    * <p>
@@ -496,7 +498,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
       }
       return content.toString();
     } catch (final Exception ex) {
-      throw new RuntimeException(ex);
+      throw new RuntimeException("Failed to fetch: " + url, ex);
     } finally {
       if (reader != null) {
         try {
@@ -562,7 +564,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
         docuri = new URI(refuri.getScheme() + "://" + refuri.getHost() + ((refuri.getPort() > -1) ? ":" + refuri.getPort() : "") + refuri.getPath());
       }
       refdoc = uriResolver.apply(docuri);
-      refdoc = expandReferences(refdoc, refdoc, docuri, resolved, expanded, uriResolver);
+      refdoc = expandReferences(null, refdoc, refdoc, docuri, resolved, expanded, uriResolver);
     }
     if (refuri.getFragment() == null) {
       return refdoc;
@@ -583,7 +585,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    * @param done
    * @return
    */
-  static Json expandReferences(Json json, Json topdoc, URI base, Map<String, Json> resolved, Map<Json, Json> expanded, Function<URI, Json> uriResolver) throws Exception {
+  static Json expandReferences(String field, Json json, Json topdoc, URI base, Map<String, Json> resolved, Map<Json, Json> expanded, Function<URI, Json> uriResolver) throws Exception {
     if (expanded.containsKey(json)) {
       return json;
     }
@@ -593,7 +595,8 @@ public class Json implements java.io.Serializable, Iterable<Json> {
         base = base.resolve(json.at("id").asString());
       }
 
-      if (json.has("$ref")) {
+      if (json.has("$ref") && !"properties".equals(field)) {
+//        if (json.has("$ref") && json.at("$ref").isString()) {
         final URI refuri = makeAbsolute(base, json.at("$ref").asString()); // base.resolve(json.at("$ref").asString());
         Json ref = resolved.get(refuri.toString());
         if (ref == null) {
@@ -604,12 +607,12 @@ public class Json implements java.io.Serializable, Iterable<Json> {
         json = ref;
       } else {
         for (final Map.Entry<String, Json> e : json.asJsonMap().entrySet()) {
-          json.set(e.getKey(), expandReferences(e.getValue(), topdoc, base, resolved, expanded, uriResolver));
+          json.set(e.getKey(), expandReferences(e.getKey(), e.getValue(), topdoc, base, resolved, expanded, uriResolver));
         }
       }
     } else if (json.isArray()) {
       for (int i = 0; i < json.asJsonList().size(); i++) {
-        json.set(i, expandReferences(json.at(i), topdoc, base, resolved, expanded, uriResolver));
+        json.set(i, expandReferences(null, json.at(i), topdoc, base, resolved, expanded, uriResolver));
       }
     }
     expanded.put(json, json);
@@ -706,7 +709,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
 
     class CheckNumber implements Instruction {
       double min = Double.NaN, max = Double.NaN, multipleOf = Double.NaN;
-      boolean exclusiveMin = false, exclusiveMax = false;
+      double exclusiveMin = Double.NaN, exclusiveMax = Double.NaN;
 
       @Override
       public Json apply(Json param) {
@@ -715,11 +718,17 @@ public class Json implements java.io.Serializable, Iterable<Json> {
           return errors;
         }
         final double value = param.asDouble();
-        if (!Double.isNaN(this.min) && (value < this.min || this.exclusiveMin && value == this.min)) {
+        if (!Double.isNaN(this.min) && (value < this.min)) {
           errors = maybeError(errors, Json.make("Number " + param + " is below allowed minimum " + this.min));
         }
-        if (!Double.isNaN(this.max) && (value > this.max || this.exclusiveMax && value == this.max)) {
+        if (!Double.isNaN(this.exclusiveMin) && value <= this.min) {
+          errors = maybeError(errors, Json.make("Number " + param + " is equal or below allowed exclusive minimum " + this.exclusiveMin));
+        }
+        if (!Double.isNaN(this.max) && (value > this.max)) {
           errors = maybeError(errors, Json.make("Number " + param + " is above allowed maximum " + this.max));
+        }
+        if (!Double.isNaN(this.exclusiveMax) && value >= this.max) {
+          errors = maybeError(errors, Json.make("Number " + param + " is equal or above allowed exclusive maximum " + this.exclusiveMax));
         }
         if (!Double.isNaN(this.multipleOf) && (value / this.multipleOf) % 1 != 0) {
           errors = maybeError(errors, Json.make("Number " + param + " is not a multiple of  " + this.multipleOf));
@@ -1049,7 +1058,11 @@ public class Json implements java.io.Serializable, Iterable<Json> {
       if (S.has("allOf")) {
         final Sequence sub = new Sequence();
         for (final Json x : S.at("allOf").asJsonList()) {
-          sub.add(compile(x, compiled));
+          if (x.isBoolean()) {
+            sub.add(any);
+          } else {
+            sub.add(compile(x, compiled));
+          }
         }
         seq.add(sub);
       }
@@ -1057,7 +1070,11 @@ public class Json implements java.io.Serializable, Iterable<Json> {
         final CheckAny any = new CheckAny();
         any.schema = S.at("anyOf");
         for (final Json x : any.schema.asJsonList()) {
-          any.alternates.add(compile(x, compiled));
+          if (x.isBoolean()) {
+            any.alternates.add(any);
+          } else {
+            any.alternates.add(compile(x, compiled));
+          }
         }
         seq.add(any);
       }
@@ -1081,6 +1098,9 @@ public class Json implements java.io.Serializable, Iterable<Json> {
       final CheckObject objectCheck = new CheckObject();
       if (S.has("properties")) {
         for (final Map.Entry<String, Json> p : S.at("properties").asJsonMap().entrySet()) {
+          if (p.getValue().isBoolean()) {
+            continue; // TODO
+          }
           objectCheck.props.add(objectCheck.new CheckProperty(p.getKey(), compile(p.getValue(), compiled)));
         }
       }
@@ -1108,20 +1128,24 @@ public class Json implements java.io.Serializable, Iterable<Json> {
       }
 
       final CheckArray arrayCheck = new CheckArray();
-      if (S.has("items")) {
-        if (S.at("items").isObject()) {
-          arrayCheck.schema = compile(S.at("items"), compiled);
+      if (S.has("prefixItems")) {
+        if (S.at("prefixItems").isObject()) {
+          arrayCheck.schema = compile(S.at("prefixItems"), compiled);
         } else {
           arrayCheck.schemas = new ArrayList<Instruction>();
-          for (final Json s : S.at("items").asJsonList()) {
-            arrayCheck.schemas.add(compile(s, compiled));
+          for (final Json s : S.at("prefixItems").asJsonList()) {
+            if (s.isBoolean()) {
+              arrayCheck.schemas.add(any);
+            } else {
+              arrayCheck.schemas.add(compile(s, compiled));
+            }
           }
         }
       }
-      if (S.has("additionalItems")) {
-        if (S.at("additionalItems").isObject()) {
-          arrayCheck.additionalSchema = compile(S.at("additionalItems"), compiled);
-        } else if (!S.at("additionalItems").asBoolean()) {
+      if (S.has("items")) {
+        if (S.at("items").isObject()) {
+          arrayCheck.additionalSchema = compile(S.at("items"), compiled);
+        } else if (!S.at("items").asBoolean()) {
           arrayCheck.additionalSchema = null;
         }
       }
@@ -1149,10 +1173,10 @@ public class Json implements java.io.Serializable, Iterable<Json> {
         numberCheck.multipleOf = S.at("multipleOf").asDouble();
       }
       if (S.has("exclusiveMinimum")) {
-        numberCheck.exclusiveMin = S.at("exclusiveMinimum").asBoolean();
+        numberCheck.exclusiveMin = S.at("exclusiveMinimum").asDouble();
       }
       if (S.has("exclusiveMaximum")) {
-        numberCheck.exclusiveMax = S.at("exclusiveMaximum").asBoolean();
+        numberCheck.exclusiveMax = S.at("exclusiveMaximum").asDouble();
       }
       if (!Double.isNaN(numberCheck.min) || !Double.isNaN(numberCheck.max) || !Double.isNaN(numberCheck.multipleOf)) {
         seq.add(numberCheck);
@@ -1209,7 +1233,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
           };
         }
         this.theschema = theschema.dup();
-        this.theschema = expandReferences(this.theschema, this.theschema, this.uri, new HashMap<String, Json>(), new IdentityHashMap<Json, Json>(), relativeReferenceResolver);
+        this.theschema = expandReferences(null, this.theschema, this.theschema, this.uri, new HashMap<String, Json>(), new IdentityHashMap<Json, Json>(), relativeReferenceResolver);
       } catch (final Exception ex) {
         throw new RuntimeException(ex);
       }
@@ -1674,7 +1698,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    * @return The JSON element at the specified index in this array.
    */
   public Json at(int index) {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1688,7 +1712,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    * @return The JSON element that is the value of that property.
    */
   public Json at(String property) {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1736,7 +1760,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    * @param property The name of the property.
    */
   public boolean has(String property) {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1753,7 +1777,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    * @return
    */
   public boolean is(String property, Object value) {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1770,7 +1794,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    * @return
    */
   public boolean is(int index, Object value) {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1781,7 +1805,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    * @return this
    */
   public Json add(Json el) {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1809,7 +1833,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    *         such a property to begin with.
    */
   public Json atDel(String property) {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1822,7 +1846,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    * @return The element value.
    */
   public Json atDel(int index) {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1834,7 +1858,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    * @return this
    */
   public Json delAt(String property) {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1846,7 +1870,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    * @return this
    */
   public Json delAt(int index) {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1858,7 +1882,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    * @return this
    */
   public Json remove(Json el) {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1885,7 +1909,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    * @return this
    */
   public Json set(String property, Json value) {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1912,7 +1936,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    * @return this
    */
   public Json set(int index, Object value) {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1930,7 +1954,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    * @return this
    */
   public Json with(Json object, Json[] options) {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1952,7 +1976,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    *         copy and extra underlying values recursively for all nested elements.
    */
   public Object getValue() {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1961,7 +1985,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    *         a boolean.
    */
   public boolean asBoolean() {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1970,7 +1994,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    *         a string.
    */
   public String asString() {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1979,7 +2003,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    *         a number.
    */
   public int asInteger() {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1988,7 +2012,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    *         a number.
    */
   public float asFloat() {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -1997,7 +2021,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    *         a number.
    */
   public double asDouble() {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -2006,7 +2030,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    *         a number.
    */
   public long asLong() {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -2015,7 +2039,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    *         a number.
    */
   public short asShort() {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -2024,7 +2048,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    *         a number.
    */
   public byte asByte() {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -2033,7 +2057,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    *         a string.
    */
   public char asChar() {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -2043,7 +2067,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    *         instance is indeed a <code>Json</code> object.
    */
   public Map<String, Object> asMap() {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -2054,7 +2078,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    *         a <code>Json</code> object.
    */
   public Map<String, Json> asJsonMap() {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -2064,7 +2088,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    *         indeed a <code>Json</code> array.
    */
   public List<Object> asList() {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
@@ -2075,7 +2099,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    *         instance is indeed a <code>Json</code> array.
    */
   public List<Json> asJsonList() {
-    throw new UnsupportedOperationException();
+    throw new UnsupportedOperationException(this.toString(MAX_CHARACTERS));
   }
 
   /**
