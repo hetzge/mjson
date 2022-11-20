@@ -174,9 +174,8 @@ public class TestSchemas {
       }
       for (final Json one : set.asJsonList()) {
         try {
-          final Json.Schema schema = Json.schema(one.at("schema"));
           for (final Json t : one.at("tests").asJsonList()) {
-            tests.add(new TestJsonSchemaSuite(test.getKey(), t.at("description", "***").asString() + "/" + one.at("description", "---").asString(), schema, t.at("data"), t.at("valid", true).asBoolean()));
+            tests.add(new TestJsonSchemaSuite(test.getKey(), t.at("description", "***").asString() + "/" + one.at("description", "---").asString(), one, t));
           }
         } catch (final Throwable t) {
           throw new RuntimeException("While adding tests from file " + test.getKey() + " - " + one, t);
@@ -198,7 +197,7 @@ public class TestSchemas {
       final Json.Schema schema = Json.schema(one.at("schema"));
       // System.out.println(one.at("schema"));
       for (final Json t : one.at("tests").asJsonList()) {
-        final TestJsonSchemaSuite thetest = new TestJsonSchemaSuite("properties", t.at("description", "***").asString() + "/" + one.at("description", "---").asString(), schema, t.at("data"), t.at("valid", true).asBoolean());
+        final TestJsonSchemaSuite thetest = new TestJsonSchemaSuite("properties", t.at("description", "***").asString() + "/" + one.at("description", "---").asString(), one, t);
         try {
           thetest.doTest();
         } catch (final Throwable ex) {

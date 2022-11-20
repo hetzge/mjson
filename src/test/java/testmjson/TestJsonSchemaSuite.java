@@ -29,7 +29,7 @@ public class TestJsonSchemaSuite {
   private final Json data;
   private final boolean valid;
 
-  @Parameters
+  @Parameters(name = "{1}")
   public static Collection<Object[]> data() {
     final List<Object[]> tests = new ArrayList<Object[]>();
     for (final Map.Entry<String, String> test : TestSchemas.testResources("src/test/resources/suite/draft2020-12").entrySet()) {
@@ -39,9 +39,8 @@ public class TestJsonSchemaSuite {
       }
       for (final Json one : set.asJsonList()) {
         try {
-          final Json.Schema schema = Json.schema(one.at("schema"));
           for (final Json t : one.at("tests").asJsonList()) {
-            tests.add(new Object[] { test.getKey(), t.at("description", "***").asString() + "/" + one.at("description", "---").asString(), schema, t.at("data"), t.at("valid", true).asBoolean() });
+            tests.add(new Object[] { test.getKey(), t.at("description", "***").asString() + "/" + one.at("description", "---").asString(), one, t });
           }
         } catch (final Throwable t) {
           throw new RuntimeException("While adding tests from file " + test.getKey() + " - " + one, t);
@@ -51,12 +50,12 @@ public class TestJsonSchemaSuite {
     return tests;
   }
 
-  public TestJsonSchemaSuite(String group, String description, Json.Schema schema, Json data, boolean valid) {
+  public TestJsonSchemaSuite(String group, String description, Json one, Json test) {
     this.group = group;
     this.description = description;
-    this.schema = schema;
-    this.data = data;
-    this.valid = valid;
+    this.schema = Json.schema(one.at("schema"));
+    this.data = test.at("data");
+    this.valid = test.at("valid", true).asBoolean();
   }
 
   @Test

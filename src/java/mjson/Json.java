@@ -590,13 +590,24 @@ public class Json implements java.io.Serializable, Iterable<Json> {
       return json;
     }
     if (json.isObject()) {
-      if (json.has("id") && json.at("id").isString()) // change scope of nest references
+      if (json.has("$id") && json.at("$id").isString()) // change scope of nest references
       {
-        base = base.resolve(json.at("id").asString());
+        base = base.resolve(json.at("$id").asString());
+      }
+
+      // TODO check solution
+      if (json.has("$defs") && !"properties".equals(field)) {
+        for (final Map.Entry<String, Json> e : json.at("$defs").asJsonMap().entrySet()) {
+          final Json defJson = e.getValue();
+          URI defBaseUri = base;
+          if (defJson.has("$id") && defJson.at("$id").isString()) {
+            defBaseUri = base.resolve(defJson.at("$id").asString());
+          }
+          resolved.put(defBaseUri.toString(), expandReferences(e.getKey(), defJson, topdoc, defBaseUri, resolved, expanded, uriResolver));
+        }
       }
 
       if (json.has("$ref") && !"properties".equals(field)) {
-//        if (json.has("$ref") && json.at("$ref").isString()) {
         final URI refuri = makeAbsolute(base, json.at("$ref").asString()); // base.resolve(json.at("$ref").asString());
         Json ref = resolved.get(refuri.toString());
         if (ref == null) {
