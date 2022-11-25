@@ -577,13 +577,12 @@ public class Json implements java.io.Serializable, Iterable<Json> {
    * <p>
    * Replace all JSON references, as per the
    * http://tools.ietf.org/html/draft-pbryan-zyp-json-ref-03 specification, by
-   * their referants.
+   * their referents.
    * </p>
    *
-   * @param json
-   * @param duplicate
-   * @param done
-   * @return
+   * @param field the field the given <code>json</code> is retrieved from
+   * @param json  the json the references should be expanded for
+   * @return the expanded json
    */
   static Json expandReferences(String field, Json json, Json topdoc, URI base, Map<String, Json> resolved, Map<Json, Json> expanded, Function<URI, Json> uriResolver) throws Exception {
     if (expanded.containsKey(json)) {
@@ -596,18 +595,20 @@ public class Json implements java.io.Serializable, Iterable<Json> {
       }
 
       // TODO check solution
-      if (json.has("$defs") && !"properties".equals(field)) {
+      if (json.has("$defs") && !"properties".equals(field) && json.at("$defs").isObject()) {
         for (final Map.Entry<String, Json> e : json.at("$defs").asJsonMap().entrySet()) {
           final Json defJson = e.getValue();
-          URI defBaseUri = base;
-          if (defJson.has("$id") && defJson.at("$id").isString()) {
-            defBaseUri = base.resolve(defJson.at("$id").asString());
+          if (defJson.isObject()) {
+            URI defBaseUri = base;
+            if (defJson.has("$id") && defJson.at("$id").isString()) {
+              defBaseUri = base.resolve(defJson.at("$id").asString());
+            }
+            resolved.put(defBaseUri.toString(), expandReferences(e.getKey(), defJson, topdoc, defBaseUri, resolved, expanded, uriResolver));
           }
-          resolved.put(defBaseUri.toString(), expandReferences(e.getKey(), defJson, topdoc, defBaseUri, resolved, expanded, uriResolver));
         }
       }
 
-      if (json.has("$ref") && !"properties".equals(field)) {
+      if (json.has("$ref") && !"properties".equals(field) && json.at("$ref").isObject()) {
         final URI refuri = makeAbsolute(base, json.at("$ref").asString()); // base.resolve(json.at("$ref").asString());
         Json ref = resolved.get(refuri.toString());
         if (ref == null) {
@@ -839,7 +840,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
         Instruction schema;
 
         public CheckPatternProperty(String pattern, Instruction schema) {
-          this.pattern = Pattern.compile(pattern);
+          this.pattern = Pattern.compile(pattern.replace("\\p{Letter}", "\\p{L}").replace("\\p{digit}", "\\p{L}"));
           this.schema = schema;
         }
 
@@ -1053,13 +1054,28 @@ public class Json implements java.io.Serializable, Iterable<Json> {
       }
     }
 
-    Instruction compile(Json S, Map<Json, Instruction> compiled) {
+    Instruction compile(final Json S, Map<Json, Instruction> compiled) {
       Instruction result = compiled.get(S);
       if (result != null) {
         return result;
       }
       final Sequence seq = new Sequence();
       compiled.put(S, seq);
+      if (S.isBoolean()) {
+        seq.add(new Instruction() {
+          @Override
+          public Json apply(Json t) {
+            if (S.asBoolean()) {
+              return t == null ? Json.array().add("Value expected but nothing found") : null;
+            } else {
+              return t != null ? Json.array().add("No value expected but found: " + t.toString(MAX_CHARACTERS)) : null;
+            }
+          }
+        });
+        result = seq.seq.size() == 1 ? seq.seq.get(0) : seq;
+        compiled.put(S, result);
+        return result;
+      }
       if (S.has("type") && !S.is("type", "any")) {
         seq.add(new CheckType(S.at("type").isString() ? Json.array().add(S.at("type")) : S.at("type")));
       }
@@ -1201,7 +1217,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
         stringCheck.max = S.at("maxLength").asInteger();
       }
       if (S.has("pattern")) {
-        stringCheck.pattern = Pattern.compile(S.at("pattern").asString());
+        stringCheck.pattern = Pattern.compile(S.at("pattern").asString().replace("\\p{Letter}", "\\p{L}").replace("\\p{digit}", "\\p{L}"));
       }
       if (stringCheck.min > 0 || stringCheck.max < Integer.MAX_VALUE || stringCheck.pattern != null) {
         seq.add(stringCheck);
