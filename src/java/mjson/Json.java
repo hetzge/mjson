@@ -19,6 +19,7 @@
 package mjson;
 
 import java.io.IOException;
+import java.io.Writer;
 import java.math.BigDecimal;
 import java.math.BigInteger;
 import java.net.URI;
@@ -283,7 +284,7 @@ import java.util.regex.Pattern;
  * @author Borislav Iordanov
  * @version 2.0.0
  */
-public class Json implements java.io.Serializable, Iterable<Json> {
+public abstract class Json implements java.io.Serializable, Iterable<Json> {
 
   private static final long serialVersionUID = 1L;
   private static final int MAX_CHARACTERS = 200;
@@ -467,6 +468,8 @@ public class Json implements java.io.Serializable, Iterable<Json> {
      */
     // Json generate(Json options);
   }
+
+  public abstract void write(Writer writer) throws IOException;
 
   @Override
   public Iterator<Json> iterator() {
@@ -2283,6 +2286,11 @@ public class Json implements java.io.Serializable, Iterable<Json> {
     }
 
     @Override
+    public void write(Writer writer) throws IOException {
+      writer.write("null");
+    }
+
+    @Override
     public String toString() {
       return "null";
     }
@@ -2399,6 +2407,11 @@ public class Json implements java.io.Serializable, Iterable<Json> {
     }
 
     @Override
+    public void write(Writer writer) throws IOException {
+      writer.write(this.val ? "true" : "false");
+    }
+
+    @Override
     public String toString() {
       return this.val ? "true" : "false";
     }
@@ -2511,6 +2524,11 @@ public class Json implements java.io.Serializable, Iterable<Json> {
     }
 
     @Override
+    public void write(Writer writer) throws IOException {
+      writer.write('"' + escaper.escapeJsonString(this.val) + '"');
+    }
+
+    @Override
     public String toString() {
       return '"' + escaper.escapeJsonString(this.val) + '"';
     }
@@ -2618,6 +2636,11 @@ public class Json implements java.io.Serializable, Iterable<Json> {
     @SuppressWarnings("unchecked")
     public List<Object> asList() {
       return (List<Object>) (List<?>) Collections.singletonList(this.val);
+    }
+
+    @Override
+    public void write(Writer writer) throws IOException {
+      writer.write(this.val.toString());
     }
 
     @Override
@@ -2863,6 +2886,19 @@ public class Json implements java.io.Serializable, Iterable<Json> {
     }
 
     @Override
+    public void write(Writer writer) throws IOException {
+      writer.write("[");
+      for (final Iterator<Json> i = this.L.iterator(); i.hasNext();) {
+        final Json value = i.next();
+        value.write(writer);
+        if (i.hasNext()) {
+          writer.write(",");
+        }
+      }
+      writer.write("]");
+    }
+
+    @Override
     public String toString() {
       return toString(Integer.MAX_VALUE);
     }
@@ -3059,6 +3095,25 @@ public class Json implements java.io.Serializable, Iterable<Json> {
     @Override
     public Map<String, Json> asJsonMap() {
       return this.object;
+    }
+
+    @Override
+    public void write(Writer writer) throws IOException {
+      writer.write("{");
+      for (final Iterator<Map.Entry<String, Json>> i = this.object.entrySet().iterator(); i.hasNext();) {
+        final Map.Entry<String, Json> entry = i.next();
+        final String key = entry.getKey();
+        final Json value = entry.getValue();
+        writer.append('"');
+        writer.append(escaper.escapeJsonString(key));
+        writer.write('"');
+        writer.write(":");
+        value.write(writer);
+        if (i.hasNext()) {
+          writer.write(",");
+        }
+      }
+      writer.write("}");
     }
 
     @Override
