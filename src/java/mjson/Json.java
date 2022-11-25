@@ -555,7 +555,7 @@ public class Json implements java.io.Serializable, Iterable<Json> {
   }
 
   static Json resolveRef(URI base, Json refdoc, URI refuri, Map<String, Json> resolved, Map<Json, Json> expanded, Function<URI, Json> uriResolver) throws Exception {
-    if (refuri.isAbsolute() && (base == null || !base.isAbsolute() || !base.getScheme().equals(refuri.getScheme()) || !Objects.equals(base.getHost(), refuri.getHost()) || base.getPort() != refuri.getPort() || !base.getPath().equals(refuri.getPath()))) {
+    if (refuri.isAbsolute() && (base == null || !base.isAbsolute() || !base.getScheme().equals(refuri.getScheme()) || !Objects.equals(base.getHost(), refuri.getHost()) || base.getPort() != refuri.getPort() || (refuri.getPath() != null && !base.getPath().equals(refuri.getPath())))) {
       URI docuri = null;
       refuri = refuri.normalize();
       if (refuri.getHost() == null) {
@@ -563,7 +563,11 @@ public class Json implements java.io.Serializable, Iterable<Json> {
       } else {
         docuri = new URI(refuri.getScheme() + "://" + refuri.getHost() + ((refuri.getPort() > -1) ? ":" + refuri.getPort() : "") + refuri.getPath());
       }
-      refdoc = uriResolver.apply(docuri);
+      if (resolved.containsKey(docuri.toString())) {
+        refdoc = resolved.get(docuri.toString());
+      } else {
+        refdoc = uriResolver.apply(docuri);
+      }
       refdoc = expandReferences(null, refdoc, refdoc, docuri, resolved, expanded, uriResolver);
     }
     if (refuri.getFragment() == null) {
@@ -594,7 +598,6 @@ public class Json implements java.io.Serializable, Iterable<Json> {
         base = base.resolve(json.at("$id").asString());
       }
 
-      // TODO check solution
       if (json.has("$defs") && !"properties".equals(field) && json.at("$defs").isObject()) {
         for (final Map.Entry<String, Json> e : json.at("$defs").asJsonMap().entrySet()) {
           final Json defJson = e.getValue();
@@ -603,18 +606,28 @@ public class Json implements java.io.Serializable, Iterable<Json> {
             if (defJson.has("$id") && defJson.at("$id").isString()) {
               defBaseUri = base.resolve(defJson.at("$id").asString());
             }
-            resolved.put(defBaseUri.toString(), expandReferences(e.getKey(), defJson, topdoc, defBaseUri, resolved, expanded, uriResolver));
+            resolved.put(defBaseUri.toString(), expandReferences(e.getKey(), defJson, topdoc, base, resolved, expanded, uriResolver));
           }
         }
       }
 
-      if (json.has("$ref") && !"properties".equals(field) && json.at("$ref").isObject()) {
-        final URI refuri = makeAbsolute(base, json.at("$ref").asString()); // base.resolve(json.at("$ref").asString());
+      if (json.has("$ref") && !"properties".equals(field)) {
+        final URI refuri = makeAbsolute(base, json.at("$ref").asString());
         Json ref = resolved.get(refuri.toString());
         if (ref == null) {
           ref = Json.object();
           resolved.put(refuri.toString(), ref);
-          ref.with(resolveRef(base, topdoc, refuri, resolved, expanded, uriResolver));
+          Json resolvedRef = resolveRef(base, topdoc, refuri, resolved, expanded, uriResolver);
+          if (resolvedRef != null && resolvedRef.isBoolean()) {
+            if (resolvedRef.asBoolean()) {
+              // always match
+              resolvedRef = Json.object().set("type", "any");
+            } else {
+              // never match
+              resolvedRef = Json.object().set("not", Json.object().set("type", "any"));
+            }
+          }
+          ref.with(resolvedRef);
         }
         json = ref;
       } else {
