@@ -289,6 +289,18 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
   private static final long serialVersionUID = 1L;
   private static final int MAX_CHARACTERS = 200;
 
+  private static final Map<String, Pattern> PATTERN_BY_FORMAT;
+  static {
+    PATTERN_BY_FORMAT = new HashMap<>();
+    PATTERN_BY_FORMAT.put("date-time", Pattern.compile("^(?:[1-9]\\d{3}-(?:(?:0[1-9]|1[0-2])-(?:0[1-9]|1\\d|2[0-8])|(?:0[13-9]|1[0-2])-(?:29|30)|(?:0[13578]|1[02])-31)|(?:[1-9]\\d(?:0[48]|[2468][048]|[13579][26])|(?:[2468][048]|[13579][26])00)-02-29)T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:Z|[+-][01]\\d:[0-5]\\d)$"));
+    PATTERN_BY_FORMAT.put("date", Pattern.compile("^(?:[1-9]\\d{3}-(?:(?:0[1-9]|1[0-2])-(?:0[1-9]|1\\d|2[0-8])|(?:0[13-9]|1[0-2])-(?:29|30)|(?:0[13578]|1[02])-31)|(?:[1-9]\\d(?:0[48]|[2468][048]|[13579][26])|(?:[2468][048]|[13579][26])00)-02-29)$"));
+    PATTERN_BY_FORMAT.put("time", Pattern.compile("^(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:Z|[+-][01]\\d:[0-5]\\d)$"));
+    PATTERN_BY_FORMAT.put("duration", Pattern.compile("^P(?!$)(\\d+(?:\\.\\d+)?Y)?(\\d+(?:\\.\\d+)?M)?(\\d+(?:\\.\\d+)?W)?(\\d+(?:\\.\\d+)?D)?(T(?=\\d)(\\d+(?:\\.\\d+)?H)?(\\d+(?:\\.\\d+)?M)?(\\d+(?:\\.\\d+)?S)?)?$"));
+    PATTERN_BY_FORMAT.put("email", Pattern.compile("^P(?!$)(\\d+(?:\\.\\d+)?Y)?(\\d+(?:\\.\\d+)?M)?(\\d+(?:\\.\\d+)?W)?(\\d+(?:\\.\\d+)?D)?(T(?=\\d)(\\d+(?:\\.\\d+)?H)?(\\d+(?:\\.\\d+)?M)?(\\d+(?:\\.\\d+)?S)?)?$"));
+
+    PATTERN_BY_FORMAT.put("relative-json-pointer", Pattern.compile("^(([1-9]+0*)+|0{1})(\\/[\\/\\w]*)*#{0,1}$"));
+  }
+
   /**
    * <p>
    * This interface defines how <code>Json</code> instances are constructed. There
@@ -663,6 +675,14 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
       }
     };
 
+    // Nothing is valid schema
+    static Instruction never = new Instruction() {
+      @Override
+      public Json apply(Json param) {
+        return Json.make("Never valid");
+      }
+    };
+
     // Type validation
     class IsObject implements Instruction {
       @Override
@@ -766,11 +786,17 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
     }
 
     class CheckArray implements Instruction {
-      int min = 0, max = Integer.MAX_VALUE;
+      int min = 0;
+      int max = Integer.MAX_VALUE;
       Boolean uniqueitems = null;
+      Instruction prefixSchema;
       Instruction additionalSchema = any;
+      Instruction unevaluatedSchema;
       Instruction schema;
-      ArrayList<Instruction> schemas;
+      ArrayList<Instruction> prefixSchemas;
+      int minContains = 1;
+      int maxContains = Integer.MAX_VALUE;
+      Instruction contains;
 
       @Override
       public Json apply(Json param) {
@@ -778,23 +804,43 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
         if (!param.isArray()) {
           return errors;
         }
-        if (this.schema == null && this.schemas == null && this.additionalSchema == null) { // no schema specified
+        if (this.prefixSchema != null && this.schema == null && this.prefixSchemas == null && this.additionalSchema == null && this.unevaluatedSchema == null) { // no schema specified
           return errors;
         }
         final int size = param.asJsonList().size();
+        int containsCount = 0;
         for (int i = 0; i < size; i++) {
-          final Instruction S = this.schema != null ? this.schema : (this.schemas != null && i < this.schemas.size()) ? this.schemas.get(i) : this.additionalSchema;
-          if (S == null) {
-            errors = maybeError(errors, Json.make("Additional items are not permitted: " + param.at(i) + " in " + param.toString(DefaultSchema.this.maxchars)));
+          final Json item = param.at(i);
+          if (this.prefixSchema != null) {
+            errors = maybeError(errors, this.prefixSchema.apply(item));
+          } else if (this.prefixSchemas != null && this.prefixSchemas.size() > i) {
+            errors = maybeError(errors, this.prefixSchemas.get(i).apply(item));
+          } else if (this.schema != null) {
+            errors = maybeError(errors, this.schema.apply(item));
+          } else if (this.unevaluatedSchema != null) {
+            errors = maybeError(errors, this.unevaluatedSchema.apply(item));
+          } else if (this.additionalSchema != null) {
+            errors = maybeError(errors, this.additionalSchema.apply(item));
           } else {
-            errors = maybeError(errors, S.apply(param.at(i)));
+            errors = maybeError(errors, Json.make("Additional items are not permitted: " + item + " in " + param.toString(DefaultSchema.this.maxchars)));
           }
-          if (this.uniqueitems != null && this.uniqueitems && param.asJsonList().lastIndexOf(param.at(i)) > i) {
-            errors = maybeError(errors, Json.make("Element " + param.at(i) + " is duplicate in array."));
+          if (this.uniqueitems != null && this.uniqueitems && param.asJsonList().lastIndexOf(item) > i) {
+            errors = maybeError(errors, Json.make("Element " + item + " is duplicate in array."));
+          }
+          if (this.contains != null) {
+            if (this.contains.apply(item) == null) {
+              containsCount++;
+            }
+            if (containsCount > this.maxContains) {
+              errors = maybeError(errors, Json.make("Array contains to much matches."));
+            }
           }
           if (errors != null && !errors.asJsonList().isEmpty()) {
             break;
           }
+        }
+        if (this.contains != null && containsCount < this.minContains) {
+          errors = maybeError(errors, Json.make(String.format("Array requires minimum %s matches", this.minContains)));
         }
         if (size < this.min || size > this.max) {
           errors = maybeError(errors, Json.make("Array  " + param.toString(DefaultSchema.this.maxchars) + " has number of elements outside of the permitted range [" + this.min + "," + this.max + "]."));
@@ -963,6 +1009,19 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
       }
     }
 
+    class CheckEquals implements Instruction {
+      Json value;
+
+      public CheckEquals(Json value) {
+        this.value = value;
+      }
+
+      @Override
+      public Json apply(Json param) {
+        return param.equals(this.value) ? null : Json.array().add("Element " + param.toString(DefaultSchema.this.maxchars) + " is not equal " + param.toString(DefaultSchema.this.maxchars));
+      }
+    }
+
     class CheckAny implements Instruction {
       ArrayList<Instruction> alternates = new ArrayList<Instruction>();
       Json schema;
@@ -1095,6 +1154,17 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
       if (S.has("type") && !S.is("type", "any")) {
         seq.add(new CheckType(S.at("type").isString() ? Json.array().add(S.at("type")) : S.at("type")));
       }
+      if (S.has("format")) {
+        final Pattern pattern = PATTERN_BY_FORMAT.get(S.at("format").asString());
+        if (pattern != null) {
+          final CheckString checkString = new CheckString();
+          checkString.pattern = pattern;
+          seq.add(checkString);
+        }
+      }
+      if (S.has("const")) {
+        seq.add(new CheckEquals(S.at("const")));
+      }
       if (S.has("enum")) {
         seq.add(new CheckEnum(S.at("enum")));
       }
@@ -1113,11 +1183,7 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
         final CheckAny any = new CheckAny();
         any.schema = S.at("anyOf");
         for (final Json x : any.schema.asJsonList()) {
-          if (x.isBoolean()) {
-            any.alternates.add(any);
-          } else {
-            any.alternates.add(compile(x, compiled));
-          }
+          any.alternates.add(compile(x, compiled));
         }
         seq.add(any);
       }
@@ -1173,23 +1239,32 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
       final CheckArray arrayCheck = new CheckArray();
       if (S.has("prefixItems")) {
         if (S.at("prefixItems").isObject()) {
-          arrayCheck.schema = compile(S.at("prefixItems"), compiled);
+          arrayCheck.prefixSchema = compile(S.at("prefixItems"), compiled);
         } else {
-          arrayCheck.schemas = new ArrayList<Instruction>();
+          arrayCheck.prefixSchemas = new ArrayList<Instruction>();
           for (final Json s : S.at("prefixItems").asJsonList()) {
             if (s.isBoolean()) {
-              arrayCheck.schemas.add(any);
+              arrayCheck.prefixSchemas.add(s.asBoolean() ? any : never);
             } else {
-              arrayCheck.schemas.add(compile(s, compiled));
+              arrayCheck.prefixSchemas.add(compile(s, compiled));
             }
           }
         }
       }
+      if (S.has("additionalItems")) {
+        arrayCheck.additionalSchema = compile(S.at("additionalItems"), compiled);
+      }
+      if (S.has("unevaluatedItems")) {
+        arrayCheck.unevaluatedSchema = compile(S.at("unevaluatedItems"), compiled);
+      }
       if (S.has("items")) {
-        if (S.at("items").isObject()) {
-          arrayCheck.additionalSchema = compile(S.at("items"), compiled);
+        if (S.at("items").isObject() || S.is("items", true)) {
+          arrayCheck.schema = compile(S.at("items"), compiled);
         } else if (!S.at("items").asBoolean()) {
           arrayCheck.additionalSchema = null;
+          if (arrayCheck.schema == null && arrayCheck.prefixSchemas == null && arrayCheck.prefixSchema == null) {
+            arrayCheck.schema = never;
+          }
         }
       }
       if (S.has("uniqueItems")) {
@@ -1201,7 +1276,17 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
       if (S.has("maxItems")) {
         arrayCheck.max = S.at("maxItems").asInteger();
       }
-      if (arrayCheck.schema != null || arrayCheck.schemas != null || arrayCheck.additionalSchema != any || arrayCheck.uniqueitems != null || arrayCheck.max < Integer.MAX_VALUE || arrayCheck.min > 0) {
+      if (S.has("contains")) {
+        arrayCheck.contains = compile(S.at("contains"), compiled);
+      }
+      if (S.has("minContains")) {
+        arrayCheck.minContains = S.at("minContains").asInteger();
+      }
+      if (S.has("maxContains")) {
+        arrayCheck.maxContains = S.at("maxContains").asInteger();
+      }
+
+      if (arrayCheck.contains != null || arrayCheck.schema != null || arrayCheck.prefixSchemas != null || arrayCheck.additionalSchema != any || arrayCheck.uniqueitems != null || arrayCheck.max < Integer.MAX_VALUE || arrayCheck.min > 0 || arrayCheck.unevaluatedSchema != null) {
         seq.add(arrayCheck);
       }
 
@@ -1238,16 +1323,14 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
       if (stringCheck.min > 0 || stringCheck.max < Integer.MAX_VALUE || stringCheck.pattern != null) {
         seq.add(stringCheck);
       }
-
-      if (S.has("dependencies")) {
-        for (final Map.Entry<String, Json> e : S.at("dependencies").asJsonMap().entrySet()) {
-          if (e.getValue().isObject()) {
-            seq.add(new CheckSchemaDependency(e.getKey(), compile(e.getValue(), compiled)));
-          } else if (e.getValue().isArray()) {
-            seq.add(new CheckPropertyDependency(e.getKey(), e.getValue()));
-          } else {
-            seq.add(new CheckPropertyDependency(e.getKey(), Json.array(e.getValue())));
-          }
+      if (S.has("dependentSchemas")) {
+        for (final Map.Entry<String, Json> e : S.at("dependentSchemas").asJsonMap().entrySet()) {
+          seq.add(new CheckSchemaDependency(e.getKey(), compile(e.getValue(), compiled)));
+        }
+      }
+      if (S.has("dependentRequired")) {
+        for (final Map.Entry<String, Json> e : S.at("dependentRequired").asJsonMap().entrySet()) {
+          seq.add(new CheckPropertyDependency(e.getKey(), e.getValue()));
         }
       }
       result = seq.seq.size() == 1 ? seq.seq.get(0) : seq;

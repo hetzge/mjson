@@ -11,7 +11,6 @@ import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameters;
 
-import junit.framework.AssertionFailedError;
 import mjson.Json;
 
 /**
@@ -60,15 +59,7 @@ public class TestJsonSchemaSuite {
 
   @Test
   public void doTest() {
-    try {
-      System.out.println("Running test " + this.description + " from " + this.group);
-      Assert.assertEquals("Running test " + this.description + " from " + this.group, this.valid, this.schema.validate(this.data).is("ok", true));
-    } catch (final AssertionFailedError err) // caught so we can break in with debugger here...
-    {
-      this.schema.validate(this.data);
-      throw err;
-    } catch (final Throwable t) {
-      System.err.println("Exception while running test " + this.description + " from " + this.group);
-    }
+    final Json result = this.schema.validate(this.data);
+    Assert.assertEquals(String.format("data:\n%s\nschema:\n%s\nexpected:\n%s\nresult:\n%s\n", this.data, this.schema.toJson().toString(), this.valid, result.toString()), this.valid, result.is("ok", true));
   }
 }
