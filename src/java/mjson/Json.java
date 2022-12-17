@@ -301,10 +301,16 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
     PATTERN_BY_FORMAT.put("time", Pattern.compile("^(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(\\.\\d+)*(?:Z|[+-][01]\\d:[0-5]\\d)$"));
     PATTERN_BY_FORMAT.put("duration", Pattern.compile("^P(?!$)(\\d+(?:\\.\\d+)?Y)?(\\d+(?:\\.\\d+)?M)?(\\d+(?:\\.\\d+)?W)?(\\d+(?:\\.\\d+)?D)?(T(?=\\d)(\\d+(?:\\.\\d+)?H)?(\\d+(?:\\.\\d+)?M)?(\\d+(?:\\.\\d+)?S)?)?$"));
     PATTERN_BY_FORMAT.put("email", Pattern.compile("^(?:[\\w!#\\$%&'\\*\\+\\-/=\\?\\^`\\{\\|\\}~]+\\.)" + "*[\\w!#\\$%&'\\*\\+\\-/=\\?\\^`\\{\\|\\}~]+@(?:(?:(?:[a-zA-Z0-9](?:[a-zA-Z0-9\\-](?!\\.)){0,61}[a-zA-Z0-9]?\\.)" + "+[a-zA-Z0-9](?:[a-zA-Z0-9\\-](?!$)){0,61}[a-zA-Z0-9]?)|(?:\\[(?:(?:[01]?\\d{1,2}|2[0-4]\\d|25[0-5])\\.){3}" + "(?:[01]?\\d{1,2}|2[0-4]\\d|25[0-5])\\]))$"));
+    PATTERN_BY_FORMAT.put("uuid", Pattern.compile("^(?:urn:uuid:)?[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$", Pattern.CASE_INSENSITIVE));
 
     PATTERN_BY_FORMAT.put("hostname", Pattern.compile("^(?=.{1,253}\\.?$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\\.[a-z0-9](?:[-0-9a-z]{0,61}[0-9a-z])?)*\\.?$"));
+    PATTERN_BY_FORMAT.put("ipv4", Pattern.compile("^(?:(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)\\.){3}(?:25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)$"));
+    PATTERN_BY_FORMAT.put("ipv6", Pattern.compile(
+        "^((([0-9a-f]{1,4}:){7}([0-9a-f]{1,4}|:))|(([0-9a-f]{1,4}:){6}(:[0-9a-f]{1,4}|((25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3})|:))|(([0-9a-f]{1,4}:){5}(((:[0-9a-f]{1,4}){1,2})|:((25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3})|:))|(([0-9a-f]{1,4}:){4}(((:[0-9a-f]{1,4}){1,3})|((:[0-9a-f]{1,4})?:((25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}))|:))|(([0-9a-f]{1,4}:){3}(((:[0-9a-f]{1,4}){1,4})|((:[0-9a-f]{1,4}){0,2}:((25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}))|:))|(([0-9a-f]{1,4}:){2}(((:[0-9a-f]{1,4}){1,5})|((:[0-9a-f]{1,4}){0,3}:((25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}))|:))|(([0-9a-f]{1,4}:){1}(((:[0-9a-f]{1,4}){1,6})|((:[0-9a-f]{1,4}){0,4}:((25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}))|:))|(:(((:[0-9a-f]{1,4}){1,7})|((:[0-9a-f]{1,4}){0,5}:((25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)(\\.(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)){3}))|:)))$"));
+    PATTERN_BY_FORMAT.put("uri-template", Pattern.compile("^(?:(?:[^\\x00-\\x20\"'<>%\\\\^`{|}]|%[0-9a-f]{2})|\\{[+#./;?&=,!@|]?(?:[a-z0-9_]|%[0-9a-f]{2})+(?::[1-9][0-9]{0,3}|\\*)?(?:,(?:[a-z0-9_]|%[0-9a-f]{2})+(?::[1-9][0-9]{0,3}|\\*)?)*\\})*$"));
 
     PATTERN_BY_FORMAT.put("relative-json-pointer", Pattern.compile("^(([1-9]+0*)+|0{1})(\\/[\\/\\w]*)*#{0,1}$"));
+    PATTERN_BY_FORMAT.put("json-pointer", Pattern.compile("^(?:\\/(?:[^~/]|~0|~1)*)*$"));
   }
 
   /**
@@ -600,8 +606,14 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
     if (refuri.getFragment() == null) {
       result = refdoc;
     } else {
-      result = resolvePointer(refuri.getFragment(), refdoc);
+      final Json anchor = context.getAnchor(refuri);
+      if (anchor != null) {
+        result = anchor;
+      } else {
+        result = resolvePointer(refuri.getFragment(), refdoc);
+      }
     }
+    System.out.println("result: " + result);
     return result;
   }
 
@@ -631,7 +643,23 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
         context.putResolved(base, json);
       }
 
-      // Do $defs before other
+      // https://json-schema.org/blog/posts/dynamicref-and-generics
+      if (json.has("$dynamicAnchor") && !"properties".equals(field)) {
+        context.putDynamicAnchor("#" + json.at("$dynamicAnchor").asString(), json);
+        context.putDynamicAnchor(base.resolve("#" + json.at("$dynamicAnchor").asString()).toString(), json);
+      }
+
+      if (json.has("$anchor") && !"properties".equals(field)) {
+        final String anchor = json.at("$anchor").asString();
+        if (base.getScheme() != null && base.getScheme().equals("urn")) {
+          context.putAnchor(URI.create(base.toString() + "#" + anchor), json);
+        } else {
+          System.out.println("base: " + base + ", anchor: " + anchor);
+          context.putAnchor(makeAbsolute(base, "#" + anchor), json);
+        }
+      }
+
+      // Expand $defs before other
       if (json.has("$defs") && !"properties".equals(field) && json.at("$defs").isObject()) {
         json.set("$defs", expandReferences("$defs", json.at("$defs"), topdoc, base, context));
       }
@@ -644,6 +672,19 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
         final URI refuri = makeAbsolute(base, json.at("$ref").asString());
         final Json resolved = resolveBooleanSchema(resolveRef(base, topdoc, refuri, context));
         json = deepMerge(json, resolved);
+      }
+
+      if (json.has("$dynamicRef") && !"properties".equals(field)) {
+        final String dynamicRef = json.at("$dynamicRef").asString();
+        Json anchor = context.getDynamicAnchor(dynamicRef);
+        if (anchor == null) {
+          final URI refuri = makeAbsolute(base, json.at("$dynamicRef").asString());
+          anchor = resolveBooleanSchema(resolveRef(base, topdoc, refuri, context));
+        }
+        if (anchor == null) {
+          throw new IllegalStateException(String.format("Anchor '%s' not found", dynamicRef));
+        }
+        json = deepMerge(json, anchor);
       }
     } else if (json.isArray()) {
       for (int i = 0; i < json.asJsonList().size(); i++) {
@@ -686,15 +727,19 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
   static class CompileContext {
     private final Function<URI, Json> uriResolver;
     private final Map<String, Json> resolved;
+    private final Map<String, Json> dynamicAnchors;
+    private final Map<URI, Json> anchors;
     private final Map<Json, Json> expanded;
 
     CompileContext(Function<URI, Json> uriResolver) {
-      this(uriResolver, new HashMap<String, Json>(), new IdentityHashMap<Json, Json>());
+      this(uriResolver, new HashMap<String, Json>(), new HashMap<String, Json>(), new HashMap<URI, Json>(), new IdentityHashMap<Json, Json>());
     }
 
-    CompileContext(Function<URI, Json> uriResolver, Map<String, Json> resolved, Map<Json, Json> expanded) {
+    CompileContext(Function<URI, Json> uriResolver, Map<String, Json> resolved, Map<String, Json> dynamicAnchors, Map<URI, Json> anchors, Map<Json, Json> expanded) {
       this.uriResolver = uriResolver;
       this.resolved = resolved;
+      this.dynamicAnchors = dynamicAnchors;
+      this.anchors = anchors;
       this.expanded = expanded;
     }
 
@@ -716,6 +761,28 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
 
     Json getResolved(URI uri) {
       return this.resolved.get(stripFragment(uri));
+    }
+
+    void putDynamicAnchor(String anchor, Json json) {
+      System.out.println("Add dynamic anchor " + anchor + " with " + json);
+      if (!this.dynamicAnchors.containsKey(anchor)) {
+        this.dynamicAnchors.put(anchor, json);
+      } else {
+        System.out.println("Skip");
+      }
+    }
+
+    Json getDynamicAnchor(String anchor) {
+      return this.dynamicAnchors.get(anchor);
+    }
+
+    void putAnchor(URI anchor, Json json) {
+      System.out.println("Add anchor " + anchor + " with " + json);
+      this.anchors.put(anchor, json);
+    }
+
+    Json getAnchor(URI anchor) {
+      return this.anchors.get(anchor);
     }
 
     boolean isExpanded(Json json) {
@@ -818,10 +885,10 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
         final String s = param.asString();
         final int size = s.codePointCount(0, s.length());
         if (size < this.min || size > this.max) {
-          errors = maybeError(errors, Json.make("String  " + param.toString(DefaultSchema.this.maxchars) + " has length outside of the permitted range [" + this.min + "," + this.max + "]."));
+          errors = maybeError(errors, Json.make("String " + param.toString(DefaultSchema.this.maxchars) + " has length outside of the permitted range [" + this.min + "," + this.max + "]."));
         }
-        if (this.pattern != null && !this.pattern.matcher(s).matches()) {
-          errors = maybeError(errors, Json.make("String  " + param.toString(DefaultSchema.this.maxchars) + " does not match regex " + this.pattern.toString()));
+        if (this.pattern != null && !this.pattern.matcher(s).find()) {
+          errors = maybeError(errors, Json.make("String " + param.toString(DefaultSchema.this.maxchars) + " does not match regex '" + this.pattern.toString() + "'"));
         }
         return errors;
       }
@@ -992,15 +1059,11 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
         if (this.unevaluatedSchema == null) {
           return errors;
         }
-        final Evaluated evaluated = ValidationContext.LOCAL.get().getEvaluated(json);
-        if (evaluated == null) {
-//          throw new IllegalStateException("No required evaluation happen for: " + json.toString(MAX_CHARACTERS));
-          return errors;
-        }
+        final Evaluated evaluated = ValidationContext.LOCAL.get().getOrCreateEvaluated(json);
         final Evaluated nestedEvaluated = new Evaluated(json);
         if (json.isArray()) {
           for (int i = 0; i < json.asJsonList().size(); i++) {
-            if (!evaluated.isEvaluated(i)) {
+            if (!evaluated.isEvaluated(i) || !evaluated.isSuccess(i)) {
               errors = maybeError(errors, this.unevaluatedSchema.apply(json.at(i)));
               nestedEvaluated.setEvaluated(i, errors == null);
             }
@@ -1008,8 +1071,9 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
         } else {
           for (final Entry<String, Json> entry : json.asJsonMap().entrySet()) {
             final String key = entry.getKey();
-            if (!evaluated.isEvaluated(key)) {
+            if (!evaluated.isEvaluated(key) || !evaluated.isSuccess(key)) {
               errors = maybeError(errors, this.unevaluatedSchema.apply(json.at(key)));
+              System.out.println("Unevaluated: " + errors);
               nestedEvaluated.setEvaluated(key, errors == null);
             }
           }
@@ -1178,6 +1242,7 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
       Instruction additionalSchema = any;
       ArrayList<CheckProperty> props = new ArrayList<CheckProperty>();
       ArrayList<CheckPatternProperty> patternProps = new ArrayList<CheckPatternProperty>();
+      Instruction propertyNames;
 
       // Object validation
       class CheckProperty implements Instruction {
@@ -1208,7 +1273,7 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
         Instruction schema;
 
         public CheckPatternProperty(String pattern, Instruction schema) {
-          this.pattern = Pattern.compile(pattern.replace("\\p{Letter}", "\\p{L}").replace("\\p{digit}", "\\p{L}"));
+          this.pattern = Pattern.compile(pattern.replace("\\p{Letter}", "\\p{L}").replace("\\p{digit}", "\\p{N}"));
           this.schema = schema;
         }
 
@@ -1217,7 +1282,7 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
           for (final Map.Entry<String, Json> e : param.asJsonMap().entrySet()) {
             if (this.pattern.matcher(e.getKey()).find()) {
               found.add(e.getKey());
-              errors = maybeError(errors, this.schema.apply(e.getValue()));
+              errors = maybeError(errors, new CheckProperty(e.getKey(), this.schema).apply(param));
             }
           }
           return errors;
@@ -1240,10 +1305,20 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
         for (final CheckPatternProperty I : this.patternProps) {
           errors = maybeError(errors, I.apply(param, checked));
         }
-        if (this.additionalSchema != any) {
+        if (this.additionalSchema != null) {
           for (final Map.Entry<String, Json> e : param.asJsonMap().entrySet()) {
             if (!checked.contains(e.getKey())) {
-              errors = maybeError(errors, this.additionalSchema == null ? Json.make("Extra property '" + e.getKey() + "', schema doesn't allow any properties not explicitly defined:" + param.toString(DefaultSchema.this.maxchars)) : this.additionalSchema.apply(e.getValue()));
+              final Json newErrors = this.additionalSchema.apply(e.getValue());
+              errors = maybeError(errors, newErrors);
+            }
+          }
+        }
+        if (this.propertyNames != null) {
+          for (final Map.Entry<String, Json> e : param.asJsonMap().entrySet()) {
+            final String propertyName = e.getKey();
+            final Json propertyNameErrors = this.propertyNames.apply(Json.make(propertyName));
+            if (propertyNameErrors != null) {
+              errors = maybeError(errors, Json.make(String.format("Property name '%s' is not valid", propertyName)));
             }
           }
         }
@@ -1472,19 +1547,51 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
           checkString.pattern = pattern;
           seq.add(checkString);
         } else {
-          if (schemaJson.is("format", "idn-hostname")) {
+          if (schemaJson.is("format", "uri")) {
             seq.add(new Instruction() {
 
               @Override
-              public Json apply(Json t) {
-                if (!t.isString()) {
-                  return Json.array().add("Element " + t.toString(DefaultSchema.this.maxchars) + " is not a valid idn hostname");
+              public Json apply(Json json) {
+                if (!json.isString()) {
+                  return null;
                 }
                 try {
-                  IDN.toASCII(t.asString());
+                  URI.create(json.asString());
                   return null;
                 } catch (final IllegalArgumentException e) {
-                  return Json.array().add("Element " + t.toString(DefaultSchema.this.maxchars) + " is not a valid idn hostname");
+                  return Json.array().add("Element " + json.toString(DefaultSchema.this.maxchars) + " is not a valid uri");
+                }
+              }
+            });
+          } else if (schemaJson.is("format", "idn-hostname")) {
+            seq.add(new Instruction() {
+
+              @Override
+              public Json apply(Json json) {
+                if (!json.isString()) {
+                  return null;
+                }
+                try {
+                  IDN.toASCII(json.asString());
+                  return null;
+                } catch (final IllegalArgumentException e) {
+                  return Json.array().add("Element " + json.toString(DefaultSchema.this.maxchars) + " is not a valid idn hostname");
+                }
+              }
+            });
+          } else if (schemaJson.is("format", "uri-reference")) {
+            seq.add(new Instruction() {
+
+              @Override
+              public Json apply(Json json) {
+                if (!json.isString()) {
+                  return null;
+                }
+                try {
+                  URI.create(json.asString());
+                  return null;
+                } catch (final IllegalArgumentException e) {
+                  return Json.array().add("Element " + json.toString(DefaultSchema.this.maxchars) + " is not a valid uri reference");
                 }
               }
             });
@@ -1532,9 +1639,6 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
       final CheckObject objectCheck = new CheckObject();
       if (schemaJson.has("properties")) {
         for (final Map.Entry<String, Json> p : schemaJson.at("properties").asJsonMap().entrySet()) {
-          if (p.getValue().isBoolean()) {
-            continue; // TODO
-          }
           objectCheck.props.add(objectCheck.new CheckProperty(p.getKey(), compile(p.getValue(), compiled)));
         }
       }
@@ -1544,25 +1648,23 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
         }
       }
       if (schemaJson.has("additionalProperties")) {
-        if (schemaJson.at("additionalProperties").isObject()) {
-          objectCheck.additionalSchema = compile(schemaJson.at("additionalProperties"), compiled);
-        } else if (!schemaJson.at("additionalProperties").asBoolean()) {
-          objectCheck.additionalSchema = null; // means no additional properties allowed
-        }
+        objectCheck.additionalSchema = compile(schemaJson.at("additionalProperties"), compiled);
       }
       final EndContext endContext = new EndContext();
       if (schemaJson.has("unevaluatedProperties")) {
         endContext.unevaluatedSchema = compile(schemaJson.at("unevaluatedProperties"), compiled);
       }
-
       if (schemaJson.has("minProperties")) {
         objectCheck.min = schemaJson.at("minProperties").asInteger();
       }
       if (schemaJson.has("maxProperties")) {
         objectCheck.max = schemaJson.at("maxProperties").asInteger();
       }
+      if (schemaJson.has("propertyNames")) {
+        objectCheck.propertyNames = compile(schemaJson.at("propertyNames"), compiled);
+      }
 
-      if (!objectCheck.props.isEmpty() || !objectCheck.patternProps.isEmpty() || objectCheck.additionalSchema != any || objectCheck.min > 0 || objectCheck.max < Integer.MAX_VALUE) {
+      if (!objectCheck.props.isEmpty() || !objectCheck.patternProps.isEmpty() || objectCheck.additionalSchema != any || objectCheck.min > 0 || objectCheck.max < Integer.MAX_VALUE || objectCheck.propertyNames != null) {
         seq.add(objectCheck);
       }
 
@@ -1648,7 +1750,7 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
         stringCheck.max = schemaJson.at("maxLength").asInteger();
       }
       if (schemaJson.has("pattern")) {
-        stringCheck.pattern = Pattern.compile(schemaJson.at("pattern").asString().replace("\\p{Letter}", "\\p{L}").replace("\\p{digit}", "\\p{L}"));
+        stringCheck.pattern = Pattern.compile(schemaJson.at("pattern").asString().replace("\\p{Letter}", "\\p{L}").replace("\\p{digit}", "\\p{N}"));
       }
       if (stringCheck.min > 0 || stringCheck.max < Integer.MAX_VALUE || stringCheck.pattern != null) {
         seq.add(stringCheck);
@@ -4065,6 +4167,71 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
     }
   }
   // END Reader
+
+  /**
+   * Converts potentially Unicode input to punycode. If conversion fails, returns
+   * the original input.
+   *
+   * @param input the string to convert, not null
+   * @return converted input, or original input if conversion fails
+   */
+  // Needed by UrlValidator
+  static String unicodeToASCII(final String input) {
+    if (isOnlyASCII(input)) { // skip possibly expensive processing
+      return input;
+    }
+    try {
+      final String ascii = IDN.toASCII(input);
+      if (IDNBUGHOLDER.IDN_TOASCII_PRESERVES_TRAILING_DOTS) {
+        return ascii;
+      }
+      final int length = input.length();
+      if (length == 0) {// check there is a last character
+        return input;
+      }
+      // RFC3490 3.1. 1)
+      // Whenever dots are used as label separators, the following
+      // characters MUST be recognized as dots: U+002E (full stop), U+3002
+      // (ideographic full stop), U+FF0E (fullwidth full stop), U+FF61
+      // (halfwidth ideographic full stop).
+      final char lastChar = input.charAt(length - 1);// fetch original last char
+      switch (lastChar) {
+      case '\u002E': // "." full stop
+      case '\u3002': // ideographic full stop
+      case '\uFF0E': // fullwidth full stop
+      case '\uFF61': // halfwidth ideographic full stop
+        return ascii + "."; // restore the missing stop
+      default:
+        return ascii;
+      }
+    } catch (final IllegalArgumentException e) { // input is not valid
+      return input;
+    }
+  }
+
+  private static class IDNBUGHOLDER {
+    private static boolean keepsTrailingDot() {
+      final String input = "a."; // must be a valid name
+      return input.equals(IDN.toASCII(input));
+    }
+
+    private static final boolean IDN_TOASCII_PRESERVES_TRAILING_DOTS = keepsTrailingDot();
+  }
+
+  /*
+   * Check if input contains only ASCII Treats null as all ASCII
+   */
+  private static boolean isOnlyASCII(final String input) {
+    if (input == null) {
+      return true;
+    }
+    for (int i = 0; i < input.length(); i++) {
+      if (input.charAt(i) > 0x7F) { // CHECKSTYLE IGNORE MagicNumber
+        return false;
+      }
+    }
+    return true;
+  }
 
   public static void main(String[] argv) {
     try {
