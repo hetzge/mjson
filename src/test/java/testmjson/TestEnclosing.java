@@ -1,55 +1,58 @@
 package testmjson;
 
-import mjson.Json;
-import static mjson.Json.*;
+import static mjson.Json.array;
+import static mjson.Json.make;
+import static mjson.Json.object;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Test;
+
+import mjson.Json;
 
 public class TestEnclosing {
   @Test
   public void testParentObject() {
-    Json obj = object();
-    Json s = make("hi");
+    final Json obj = object();
+    final Json s = make("hi");
     obj.set("greet", s);
-    Assert.assertTrue(obj == s.up());
+    assertTrue(obj == s.up());
 
-    Json nested = object();
+    final Json nested = object();
     obj.set("nested", nested);
-    Assert.assertTrue(obj == nested.up());
+    assertTrue(obj == nested.up());
 
     nested.set("parent", obj);
-    Assert.assertTrue(nested == obj.up());
+    assertTrue(nested == obj.up());
 
-    Json nested2 = object();
+    final Json nested2 = object();
     obj.set("nested2", nested2);
     nested2.set("parent", obj);
-    Assert.assertTrue(obj == nested2.up());
-    Assert.assertTrue(obj.up().asJsonList().contains(nested2));
+    assertTrue(obj == nested2.up());
+    assertTrue(obj.up().asJsonList().contains(nested2));
   }
 
   @Test
   public void testParentArray() {
-    Json arr = array();
-    Json i = make(10);
+    final Json arr = array();
+    final Json i = make(10);
     arr.add(i);
-    Assert.assertTrue(i.up() == arr);
+    assertTrue(i.up() == arr);
     System.out.println(i.up());
-    Json arr2 = array();
+    final Json arr2 = array();
     arr2.add(i);
 
     System.out.println(i.up());
-    Assert.assertTrue(i.up().asJsonList().contains(arr));
-    Assert.assertTrue(i.up().asJsonList().contains(arr2));
+    assertTrue(i.up().asJsonList().contains(arr));
+    assertTrue(i.up().asJsonList().contains(arr2));
   }
 
   @Test
   public void testToStringOfCircularObject() {
-    Json x = Json.object("name", "x", "tuple", Json.array());
-    Json y = Json.object("backref", x);
+    final Json x = Json.object("name", "x", "tuple", Json.array());
+    final Json y = Json.object("backref", x);
     x.at("tuple").add(y);
-    String asstring = x.toString();
-    Assert.assertTrue(asstring.contains("tuple"));
+    final String asstring = x.toString();
+    assertTrue(asstring.contains("tuple"));
   }
 
   /**

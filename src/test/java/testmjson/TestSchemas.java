@@ -6,13 +6,11 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URISyntaxException;
-import java.util.ArrayList;
 import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 
-import org.junit.Assert;
-import org.junit.Test;
+import org.junit.jupiter.api.Assertions;
+import org.junit.jupiter.api.Test;
 
 import mjson.Json;
 
@@ -113,12 +111,12 @@ public class TestSchemas {
     Json ok = Json.nil();
     if (correct != null) {
       ok = schema.validate(correct);
-      Assert.assertTrue(ok.at("errors", "").toString(), ok.at("ok").asBoolean());
+      Assertions.assertTrue(ok.at("ok").asBoolean(), ok.at("errors", "").toString());
     }
 
     if (incorrect != null) {
       ok = schema.validate(incorrect);
-      Assert.assertFalse(ok.at("ok").asBoolean());
+      Assertions.assertFalse(ok.at("ok").asBoolean());
     }
   }
 
@@ -150,7 +148,7 @@ public class TestSchemas {
     final Json result = schema.validate(data);
     if (!result.is("ok", true)) {
       System.err.println(result.at("errors"));
-      Assert.fail();
+      Assertions.fail();
     }
   }
 
@@ -161,54 +159,7 @@ public class TestSchemas {
     final Json result = schema.validate(data);
     if (!result.is("ok", true)) {
       System.err.println(result.at("errors"));
-      Assert.fail();
+      Assertions.fail();
     }
-  }
-
-  public Object[] addTests() {
-    final List<TestJsonSchemaSuite> tests = new ArrayList<TestJsonSchemaSuite>();
-    for (final Map.Entry<String, String> test : testResources("suite").entrySet()) {
-      Json set = Json.read(test.getValue());
-      if (!set.isArray()) {
-        set = Json.array().add(set);
-      }
-      for (final Json one : set.asJsonList()) {
-        try {
-          for (final Json t : one.at("tests").asJsonList()) {
-            tests.add(new TestJsonSchemaSuite(test.getKey(), t.at("description", "***").asString() + "/" + one.at("description", "---").asString(), one, t));
-          }
-        } catch (final Throwable t) {
-          throw new RuntimeException("While adding tests from file " + test.getKey() + " - " + one, t);
-        }
-      }
-    }
-    return tests.toArray();
-  }
-
-  public static void main(String[] argv) {
-//		String content = TestSchemas.readFile(new File("c:/work/mjson/schema.json"));
-//		Json j = Json.read(content);
-//		System.out.println(j.toString());
-//		Json.schema(Json.object(
-//            "$ref","https://raw.githubusercontent.com/json-schema/JSON-Schema-Test-Suite/develop/remotes/subSchemas.json#/refToInteger"
-//        ));
-    final Json set = Json.read(readTextResource("/suite/ref.json"));
-    for (final Json one : set.asJsonList()) {
-      final Json.Schema schema = Json.schema(one.at("schema"));
-      // System.out.println(one.at("schema"));
-      for (final Json t : one.at("tests").asJsonList()) {
-        final TestJsonSchemaSuite thetest = new TestJsonSchemaSuite("properties", t.at("description", "***").asString() + "/" + one.at("description", "---").asString(), one, t);
-        try {
-          thetest.doTest();
-        } catch (final Throwable ex) {
-          System.out.println("Failed at " + t);
-          ex.printStackTrace();
-          System.exit(-1);
-        }
-      }
-    }
-//		TestSchemas test = new TestSchemas();
-//		test.setUp();
-//		test.testType();
   }
 }

@@ -1,17 +1,17 @@
 package testmjson;
 
+import static org.junit.jupiter.api.Assertions.assertEquals;
+
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 
-import org.junit.Assert;
-import org.junit.Test;
-import org.junit.runner.RunWith;
-import org.junit.runners.Parameterized;
-import org.junit.runners.Parameterized.Parameters;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.MethodSource;
 
 import mjson.Json;
+import mjson.JsonSchema;
 
 /**
  * Run a test from the https://github.com/json-schema/JSON-Schema-Test-Suite
@@ -20,15 +20,8 @@ import mjson.Json;
  * @author Borislav Iordanov
  *
  */
-@RunWith(Parameterized.class)
 public class TestJsonSchemaSuite {
-  private final String group;
-  private final String description;
-  private final Json.Schema schema;
-  private final Json data;
-  private final boolean valid;
 
-  @Parameters(name = "{1}")
   public static Collection<Object[]> data() {
     final List<Object[]> tests = new ArrayList<Object[]>();
     for (final Map.Entry<String, String> test : TestSchemas.testResources("src/test/resources/suite/draft2020-12").entrySet()) {
@@ -49,17 +42,13 @@ public class TestJsonSchemaSuite {
     return tests;
   }
 
-  public TestJsonSchemaSuite(String group, String description, Json one, Json test) {
-    this.group = group;
-    this.description = description;
-    this.schema = Json.schema(one.at("schema"));
-    this.data = test.at("data");
-    this.valid = test.at("valid", true).asBoolean();
-  }
-
-  @Test
-  public void doTest() {
-    final Json result = this.schema.validate(this.data);
-    Assert.assertEquals(String.format("data:\n%s\nschema:\n%s\nexpected:\n%s\nresult:\n%s\n", this.data, this.schema.toJson().toString(), this.valid, result.toString()), this.valid, result.is("ok", true));
+  @ParameterizedTest(name = "{1}")
+  @MethodSource("data")
+  public void doTest(String group, String description, Json one, Json test) {
+    final Json.Schema schema = JsonSchema.initialize(one.at("schema"));
+    final Json data = test.at("data");
+    final boolean valid = test.at("valid", true).asBoolean();
+    final Json result = schema.validate(data);
+    assertEquals(valid, result.is("ok", true), String.format("data:\n%s\nschema:\n%s\nexpected:\n%s\nresult:\n%s\n", data, schema.toJson().toString(), valid, result.toString()));
   }
 }

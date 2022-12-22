@@ -35,6 +35,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.Iterator;
+import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Map.Entry;
@@ -583,6 +584,7 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
 
   static Json resolveRef(URI base, Json refdoc, URI refuri, CompileContext context) throws Exception {
     System.out.println("Resolve ref: " + refuri + " on " + refdoc);
+    context.pushStack(refdoc);
 
     refuri = refuri.normalize();
 
@@ -595,8 +597,9 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
         refdoc = context.resolveUri(refuri);
         refdoc = expandReferences(null, refdoc, refdoc, refuri, context);
         context.putResolved(refuri, refdoc);
+      } else {
+        refdoc = context.getResolved(refuri);
       }
-      refdoc = context.getResolved(refuri);
       if (refdoc == null) {
         throw new IllegalStateException("unresolved: " + refuri);
       }
@@ -613,8 +616,9 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
         result = resolvePointer(refuri.getFragment(), refdoc);
       }
     }
+    context.popStack();
     System.out.println("result: " + result);
-    return result;
+    return resolveBooleanSchema(result);
   }
 
   /**
@@ -661,25 +665,31 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
 
       // Expand $defs before other
       if (json.has("$defs") && !"properties".equals(field) && json.at("$defs").isObject()) {
-        json.set("$defs", expandReferences("$defs", json.at("$defs"), topdoc, base, context));
+        for (final Map.Entry<String, Json> entry : json.at("$defs").asJsonMap().entrySet()) {
+          json.at("$defs").set(entry.getKey(), expandReferences("$defs", entry.getValue(), topdoc, base, context));
+        }
       }
 
+      // TODO dont resolve references for all keys ? Expand references should only
+      // expand $ref and $dynamicRef ?! Only expand schemas ?!
       for (final Map.Entry<String, Json> entry : json.asJsonMap().entrySet()) {
         json.set(entry.getKey(), expandReferences(entry.getKey(), entry.getValue(), topdoc, base, context));
       }
 
       if (json.has("$ref") && !"properties".equals(field)) {
         final URI refuri = makeAbsolute(base, json.at("$ref").asString());
-        final Json resolved = resolveBooleanSchema(resolveRef(base, topdoc, refuri, context));
+        final Json resolved = resolveRef(base, topdoc, refuri, context);
         json = deepMerge(json, resolved);
       }
 
+      // https://github.com/json-schema-org/community/discussions/264
       if (json.has("$dynamicRef") && !"properties".equals(field)) {
+        System.out.println("buh");
         final String dynamicRef = json.at("$dynamicRef").asString();
         Json anchor = context.getDynamicAnchor(dynamicRef);
         if (anchor == null) {
           final URI refuri = makeAbsolute(base, json.at("$dynamicRef").asString());
-          anchor = resolveBooleanSchema(resolveRef(base, topdoc, refuri, context));
+          anchor = resolveRef(base, topdoc, refuri, context);
         }
         if (anchor == null) {
           throw new IllegalStateException(String.format("Anchor '%s' not found", dynamicRef));
@@ -730,6 +740,7 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
     private final Map<String, Json> dynamicAnchors;
     private final Map<URI, Json> anchors;
     private final Map<Json, Json> expanded;
+    private final LinkedList<Json> stack;
 
     CompileContext(Function<URI, Json> uriResolver) {
       this(uriResolver, new HashMap<String, Json>(), new HashMap<String, Json>(), new HashMap<URI, Json>(), new IdentityHashMap<Json, Json>());
@@ -741,6 +752,20 @@ public abstract class Json implements java.io.Serializable, Iterable<Json> {
       this.dynamicAnchors = dynamicAnchors;
       this.anchors = anchors;
       this.expanded = expanded;
+      this.stack = new LinkedList<>();
+    }
+
+    void pushStack(Json json) {
+      this.stack.add(json);
+      System.out.println(this.stack.size() + " -> " + json);
+    }
+
+    void popStack() {
+      this.stack.pop();
+    }
+
+    List<Json> getDynamicContext() {
+      return Collections.unmodifiableList(this.stack);
     }
 
     Json resolveUri(URI uri) {
