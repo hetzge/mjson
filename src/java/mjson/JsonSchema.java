@@ -1,6 +1,8 @@
 package mjson;
 
+import static java.lang.Integer.parseInt;
 import static java.lang.String.format;
+import static java.util.Objects.requireNonNull;
 import static java.util.function.Predicate.not;
 
 import java.net.IDN;
@@ -428,7 +430,7 @@ public final class JsonSchema implements Json.Schema {
           }
         }
         if (this.contains != null && containsCount < this.minContains) {
-          errors = maybeError(errors, Json.make(String.format("Array requires minimum %s matches", this.minContains)));
+          errors = maybeError(errors, Json.make(format("Array requires minimum %s matches", this.minContains)));
         }
         if (size < this.min || size > this.max) {
           errors = maybeError(errors, Json.make("Array  " + param.toString(MAX_CHARACTERS) + " has number of elements outside of the permitted range [" + this.min + "," + this.max + "]."));
@@ -544,7 +546,7 @@ public final class JsonSchema implements Json.Schema {
           final String propertyName = e.getKey();
           final Json propertyNameErrors = this.propertyNames.apply(Json.make(propertyName));
           if (propertyNameErrors != null) {
-            errors = maybeError(errors, Json.make(String.format("Property name '%s' is not valid", propertyName)));
+            errors = maybeError(errors, Json.make(format("Property name '%s' is not valid", propertyName)));
           }
         }
       }
@@ -792,79 +794,164 @@ public final class JsonSchema implements Json.Schema {
   }
 
   public static JsonSchema initialize(Json json) {
-    final JsonIndex index = index(json);
-    resolveRefs(0, "root", json, URI.create("http://__default__"), index, new LinkedList<>());
+    final URI rootUri = URI.create("http://__default__");
+    final JsonIndex index = index(json, rootUri);
+    resolveRefs(0, "root", json, rootUri, index, new LinkedList<>(), new IdentityHashMap<>());
     return new JsonSchema(json, compile(json, new IdentityHashMap<>()));
   }
 
-  private static JsonIndex index(Json json) {
-    final URI rootUri = URI.create("http://__default__");
+  private static JsonIndex index(Json json, URI rootUri) {
     final HashMap<URI, Json> index = new HashMap<>();
     index.put(rootUri, json);
-    initIndex(0, "root", index, json, rootUri);
+    index.put(rootUri.resolve("#"), json);
+    initIndex(0, "root", index, json, rootUri, new IdentityHashMap<>());
     return new JsonIndex(index);
   }
 
-  private static void initIndex(int level, String field, Map<URI, Json> index, Json json, URI uri) {
+  private static void initIndex(int level, String field, Map<URI, Json> index, Json json, URI uri, Map<Json, Json> alreadyIndexed) {
+    System.out.println("<i>" + "-".repeat(level * 2) + field);
+    if (alreadyIndexed.containsKey(json)) {
+      // Already indexed
+      return;
+    } else {
+      // Mark already indexed
+      alreadyIndexed.put(json, json);
+    }
     if (json.isObject()) {
       if (json.has("$id") && !field.equals("properties")) {
         final String id = json.at("$id").asString();
-        uri = uri.resolve(id);
+        uri = resolveUri(uri, id);
         System.out.println("index " + uri.toString());
         index.put(uri, json);
       }
       if (json.has("$anchor") && !field.equals("properties")) {
         final String anchor = json.at("$anchor").asString();
-        final URI anchorUri = uri.resolve("#" + anchor);
+        final URI anchorUri = resolveUri(uri, "#" + anchor);
         System.out.println("index " + anchorUri.toString());
         index.put(anchorUri, json);
       }
       if (json.has("$dynamicAnchor") && !field.equals("properties")) {
         final String dynamicAnchor = json.at("$dynamicAnchor").asString();
-        final URI dynamicAnchorUri = uri.resolve("#" + dynamicAnchor);
+        final URI dynamicAnchorUri = resolveUri(uri, "#" + dynamicAnchor);
         System.out.println("index dynamic " + dynamicAnchorUri.toString());
         index.put(dynamicAnchorUri, json);
       }
       for (final Entry<String, Json> entry : json.asJsonMap().entrySet()) {
-        initIndex(level + 1, entry.getKey(), index, entry.getValue(), uri);
+        initIndex(level + 1, entry.getKey(), index, entry.getValue(), uri, alreadyIndexed);
       }
     } else if (json.isArray()) {
       for (final Json item : json.asJsonList()) {
-        initIndex(level + 1, "[]", index, item, uri);
+        initIndex(level + 1, "[]", index, item, uri, alreadyIndexed);
       }
     }
   }
 
-  private static void resolveRefs(int level, String field, Json json, URI uri, JsonIndex index, LinkedList<URI> scopes) {
-//    System.out.println("-".repeat(level * 2) + field);
+  static URI resolveUri(URI uri, String sub) {
+    if (uri.getScheme() != null && uri.getScheme().equals("urn")) {
+      return URI.create(uri.toString() + sub);
+    } else {
+      System.out.println("resolve " + uri + " with " + sub + " = " + uri.resolve(sub));
+      return uri.resolve(sub);
+    }
+  }
+
+  private static void resolveRefs(int level, String field, Json json, URI uri, JsonIndex index, LinkedList<URI> scopes, Map<Json, Json> alreadyResolved) {
+    System.out.println("<r>" + "-".repeat(level * 2) + field);
+    if (alreadyResolved.containsKey(json)) {
+      // Already resolved
+      return;
+    } else {
+      // Mark already resolved
+      alreadyResolved.put(json, json);
+    }
     if (json.isObject()) {
       if (json.has("$id") && !field.equals("properties")) {
         final String id = json.at("$id").asString();
-        uri = uri.resolve(id);
+        uri = resolveUri(uri, id);
       }
       scopes.add(uri);
-
       if (json.has("$ref") && !field.equals("properties")) {
         final String ref = json.at("$ref").asString();
         json.delAt("$ref"); // mark as resolved
-        final URI refUri = uri.resolve(ref);
-        final Json resolved = index.resolve(refUri);
-        resolveRefs(level + 1, "$ref", resolved, uri, index, scopes);
+        final URI refUri = resolveUri(uri, ref);
+        final Json resolved = resolve(index, refUri);
+        resolveRefs(level + 1, "$ref", resolved, refUri, index, scopes, alreadyResolved);
         deepMerge(json, resolved);
       }
       if (json.has("$dynamicRef") && !field.equals("properties")) {
         final String dynamicRef = json.at("$dynamicRef").asString();
-        final Json dynamicResolved = scopes.stream().map(scope -> scope.resolve(dynamicRef)).map(index::get).filter(Optional::isPresent).map(Optional::get).findFirst().orElseThrow();
-        deepMerge(json, dynamicResolved);
+        final Json dynamicResolved = scopes.stream().map(scope -> scope.resolve(dynamicRef)).peek(it -> System.out.println("Scope: " + it)).map(index::get).filter(Optional::isPresent).map(Optional::get).findFirst().orElseThrow();
+        deepMerge(json, dynamicResolved); // TODO prevent recursive loop
+        // TODO not sure if this is correct !?
+        if (json.has("$id") && !field.equals("properties")) {
+          final String id = json.at("$id").asString();
+          uri = resolveUri(uri, id);
+        }
       }
       for (final Entry<String, Json> entry : json.asJsonMap().entrySet()) {
-        resolveRefs(level + 1, entry.getKey(), entry.getValue(), uri, index, scopes);
+        resolveRefs(level + 1, entry.getKey(), entry.getValue(), uri, index, scopes, alreadyResolved);
       }
       scopes.pollLast();
     } else if (json.isArray()) {
       for (final Json item : json.asJsonList()) {
-        resolveRefs(level + 1, "[]", item, uri, index, scopes);
+        resolveRefs(level + 1, "[]", item, uri, index, scopes, alreadyResolved);
       }
+    }
+  }
+
+  public static Json resolve(JsonIndex index, URI uri) {
+    requireNonNull(index, "'index' is null");
+    requireNonNull(uri, "'uri' is null");
+    return JsonUriUtils.getPointer(uri).map(pointer -> {
+      return resolvePointer(resolveInIndex(index, JsonUriUtils.getSchemaUri(uri)), pointer);
+    }).or(() -> JsonUriUtils.getAnchor(uri).map(anchor -> {
+      return resolveInIndex(index, uri);
+    })).or(() -> {
+      return Optional.of(resolveInIndex(index, JsonUriUtils.getSchemaUri(uri)));
+    }).orElseThrow(() -> new RuntimeException(format("Failed to resolve '%s'. Not found.", uri)));
+  }
+
+  private static Json resolveInIndex(JsonIndex index, URI uri) {
+    requireNonNull(index, "'index' is null");
+    requireNonNull(uri, "'uri' is null");
+    return index.get(uri).orElseGet(() -> {
+      try {
+        System.out.println("fetch from " + uri.toString());
+        final Json fetchedJson = Json.read(uri.toURL());
+        index.add(index(fetchedJson, JsonUriUtils.getSchemaUri(uri)));
+        return fetchedJson;
+      } catch (final MalformedURLException exception) {
+        throw new RuntimeException(exception);
+      }
+    });
+  }
+
+  private static Json resolvePointer(Json json, String pointer) {
+    requireNonNull(json, "'json' is null");
+    requireNonNull(pointer, "'pointer' is null");
+    if (pointer.isBlank()) {
+      return json;
+    }
+    final String[] steps = pointer.split("/");
+    Json result = json;
+    for (final String step : steps) {
+      if (step.isBlank()) {
+        continue;
+      }
+      result = getAt(result, step.replace("~1", "/").replace("~0", "~"));
+    }
+    return result;
+  }
+
+  private static Json getAt(Json json, String at) {
+    requireNonNull(json, format("Try to get at '%s' on null object", at));
+    requireNonNull(at, "'at' is null");
+    if (json.isArray()) {
+      return json.at(parseInt(at));
+    } else if (json.isObject()) {
+      return json.at(at);
+    } else {
+      throw new RuntimeException(format("Can't resolve at '%s' in document '%s'", at, json.toString(200)));
     }
   }
 
@@ -893,51 +980,39 @@ public final class JsonSchema implements Json.Schema {
         seq.add(checkString);
       } else {
         if (schemaJson.is("format", "uri")) {
-          seq.add(new Instruction() {
-
-            @Override
-            public Json apply(Json json) {
-              if (!json.isString()) {
-                return null;
-              }
-              try {
-                URI.create(json.asString());
-                return null;
-              } catch (final IllegalArgumentException e) {
-                return Json.array().add("Element " + json.toString(MAX_CHARACTERS) + " is not a valid uri");
-              }
+          seq.add(json -> {
+            if (!json.isString()) {
+              return null;
+            }
+            try {
+              URI.create(json.asString());
+              return null;
+            } catch (final IllegalArgumentException e) {
+              return Json.array().add("Element " + json.toString(MAX_CHARACTERS) + " is not a valid uri");
             }
           });
         } else if (schemaJson.is("format", "idn-hostname")) {
-          seq.add(new Instruction() {
-
-            @Override
-            public Json apply(Json json) {
-              if (!json.isString()) {
-                return null;
-              }
-              try {
-                IDN.toASCII(json.asString());
-                return null;
-              } catch (final IllegalArgumentException e) {
-                return Json.array().add("Element " + json.toString(MAX_CHARACTERS) + " is not a valid idn hostname");
-              }
+          seq.add(json -> {
+            if (!json.isString()) {
+              return null;
+            }
+            try {
+              IDN.toASCII(json.asString());
+              return null;
+            } catch (final IllegalArgumentException e) {
+              return Json.array().add("Element " + json.toString(MAX_CHARACTERS) + " is not a valid idn hostname");
             }
           });
         } else if (schemaJson.is("format", "uri-reference")) {
-          seq.add(new Instruction() {
-
-            @Override
-            public Json apply(Json json) {
-              if (!json.isString()) {
-                return null;
-              }
-              try {
-                URI.create(json.asString());
-                return null;
-              } catch (final IllegalArgumentException e) {
-                return Json.array().add("Element " + json.toString(MAX_CHARACTERS) + " is not a valid uri reference");
-              }
+          seq.add(json -> {
+            if (!json.isString()) {
+              return null;
+            }
+            try {
+              URI.create(json.asString());
+              return null;
+            } catch (final IllegalArgumentException e) {
+              return Json.array().add("Element " + json.toString(MAX_CHARACTERS) + " is not a valid uri reference");
             }
           });
         }
@@ -1172,57 +1247,18 @@ public final class JsonSchema implements Json.Schema {
     private final Map<URI, Json> index;
 
     public JsonIndex(Map<URI, Json> index) {
+      requireNonNull(index, "'index' is null");
       this.index = index;
     }
 
+    public void add(JsonIndex other) {
+      requireNonNull(other, "'other' is null");
+      this.index.putAll(other.index);
+    }
+
     public Optional<Json> get(URI uri) {
+      requireNonNull(uri, "'uri' is null");
       return Optional.ofNullable(this.index.get(uri));
     }
-
-    public Json resolve(URI uri) {
-      return JsonUriUtils.getPointer(uri).map(pointer -> {
-        return resolvePointer(resolveInIndex(JsonUriUtils.getSchemaUri(uri)), pointer);
-      }).or(() -> JsonUriUtils.getAnchor(uri).map(anchor -> {
-        return resolveInIndex(uri);
-      })).or(() -> {
-        return Optional.of(resolveInIndex(JsonUriUtils.getSchemaUri(uri)));
-      }).orElseThrow(() -> new RuntimeException(format("Failed to resolve '%s'. Not found.", uri)));
-    }
-
-    private Json resolveInIndex(URI uri) {
-      final Json json = this.index.get(uri);
-      if (json == null) {
-        // TODO extract
-        try {
-          System.out.println("fetch from " + uri.toString());
-          final Json read = Json.read(uri.toURL());
-          System.out.println(read);
-          return read;
-        } catch (final MalformedURLException exception) {
-          throw new RuntimeException(exception);
-        }
-      }
-      return json;
-    }
-
-    private static Json resolvePointer(Json json, String pointer) {
-      final String[] parts = pointer.split("/");
-      Json result = json;
-      for (String p : parts) {
-        if (p.length() == 0) {
-          continue;
-        }
-        p = p.replace("~1", "/").replace("~0", "~");
-        if (result.isArray()) {
-          result = result.at(Integer.parseInt(p));
-        } else if (result.isObject()) {
-          result = result.at(p);
-        } else {
-          throw new RuntimeException(format("Can't resolve pointer %s in document %s", pointer, json.toString(200)));
-        }
-      }
-      return result;
-    }
-
   }
 }
