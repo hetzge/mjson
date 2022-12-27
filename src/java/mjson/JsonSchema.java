@@ -9,6 +9,7 @@ import java.net.IDN;
 import java.net.MalformedURLException;
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
@@ -136,13 +137,13 @@ public final class JsonSchema implements Json.Schema {
       if (!Double.isNaN(this.min) && (value < this.min)) {
         errors = maybeError(errors, Json.make("Number " + param + " is below allowed minimum " + this.min));
       }
-      if (!Double.isNaN(this.exclusiveMin) && value <= this.min) {
+      if (!Double.isNaN(this.exclusiveMin) && value <= this.exclusiveMin) {
         errors = maybeError(errors, Json.make("Number " + param + " is equal or below allowed exclusive minimum " + this.exclusiveMin));
       }
       if (!Double.isNaN(this.max) && (value > this.max)) {
         errors = maybeError(errors, Json.make("Number " + param + " is above allowed maximum " + this.max));
       }
-      if (!Double.isNaN(this.exclusiveMax) && value >= this.max) {
+      if (!Double.isNaN(this.exclusiveMax) && value >= this.exclusiveMax) {
         errors = maybeError(errors, Json.make("Number " + param + " is equal or above allowed exclusive maximum " + this.exclusiveMax));
       }
       if (!Double.isNaN(this.multipleOf) && (value / this.multipleOf) % 1 != 0) {
@@ -794,21 +795,24 @@ public final class JsonSchema implements Json.Schema {
   }
 
   public static JsonSchema initialize(Json json) {
-    final URI rootUri = URI.create("http://__default__");
+    final URI rootUri = URI.create("http://__default__.nix");
     final JsonIndex index = index(json, rootUri);
-    resolveRefs(0, "root", json, rootUri, index, new LinkedList<>(), new IdentityHashMap<>());
-    return new JsonSchema(json, compile(json, new IdentityHashMap<>()));
+    resolveRefs(0, "root", json, rootUri, index, new IdentityHashMap<>());
+    final Deque<URI> scopes = new LinkedList<>();
+    scopes.add(rootUri);
+    return new JsonSchema(json, compile(json, new CompileContext(index, scopes, new IdentityHashMap<>())));
   }
 
   private static JsonIndex index(Json json, URI rootUri) {
-    final HashMap<URI, Json> index = new HashMap<>();
+    final Map<URI, Json> index = new HashMap<>();
     index.put(rootUri, json);
     index.put(rootUri.resolve("#"), json);
-    initIndex(0, "root", index, json, rootUri, new IdentityHashMap<>());
-    return new JsonIndex(index);
+    final Map<URI, Json> dynamicIndex = new HashMap<>();
+    initIndex(0, "root", index, dynamicIndex, json, rootUri, new IdentityHashMap<>());
+    return new JsonIndex(index, dynamicIndex);
   }
 
-  private static void initIndex(int level, String field, Map<URI, Json> index, Json json, URI uri, Map<Json, Json> alreadyIndexed) {
+  private static void initIndex(int level, String field, Map<URI, Json> index, Map<URI, Json> dynamicIndex, Json json, URI uri, Map<Json, Json> alreadyIndexed) {
     System.out.println("<i>" + "-".repeat(level * 2) + field);
     if (alreadyIndexed.containsKey(json)) {
       // Already indexed
@@ -834,20 +838,22 @@ public final class JsonSchema implements Json.Schema {
         final String dynamicAnchor = json.at("$dynamicAnchor").asString();
         final URI dynamicAnchorUri = resolveUri(uri, "#" + dynamicAnchor);
         System.out.println("index dynamic " + dynamicAnchorUri.toString());
+        dynamicIndex.put(dynamicAnchorUri, json);
+        System.out.println("index " + dynamicAnchorUri.toString());
         index.put(dynamicAnchorUri, json);
       }
       for (final Entry<String, Json> entry : json.asJsonMap().entrySet()) {
-        initIndex(level + 1, entry.getKey(), index, entry.getValue(), uri, alreadyIndexed);
+        initIndex(level + 1, entry.getKey(), index, dynamicIndex, entry.getValue(), uri, alreadyIndexed);
       }
     } else if (json.isArray()) {
       for (final Json item : json.asJsonList()) {
-        initIndex(level + 1, "[]", index, item, uri, alreadyIndexed);
+        initIndex(level + 1, "[]", index, dynamicIndex, item, uri, alreadyIndexed);
       }
     }
   }
 
   static URI resolveUri(URI uri, String sub) {
-    if (uri.getScheme() != null && uri.getScheme().equals("urn")) {
+    if (uri.getScheme() != null && uri.getScheme().equals("urn") && sub.startsWith("#")) {
       return URI.create(uri.toString() + sub);
     } else {
       System.out.println("resolve " + uri + " with " + sub + " = " + uri.resolve(sub));
@@ -855,7 +861,7 @@ public final class JsonSchema implements Json.Schema {
     }
   }
 
-  private static void resolveRefs(int level, String field, Json json, URI uri, JsonIndex index, LinkedList<URI> scopes, Map<Json, Json> alreadyResolved) {
+  private static void resolveRefs(int level, String field, Json json, URI uri, JsonIndex index, Map<Json, Json> alreadyResolved) {
     System.out.println("<r>" + "-".repeat(level * 2) + field);
     if (alreadyResolved.containsKey(json)) {
       // Already resolved
@@ -869,32 +875,20 @@ public final class JsonSchema implements Json.Schema {
         final String id = json.at("$id").asString();
         uri = resolveUri(uri, id);
       }
-      scopes.add(uri);
       if (json.has("$ref") && !field.equals("properties")) {
         final String ref = json.at("$ref").asString();
         json.delAt("$ref"); // mark as resolved
         final URI refUri = resolveUri(uri, ref);
         final Json resolved = resolve(index, refUri);
-        resolveRefs(level + 1, "$ref", resolved, refUri, index, scopes, alreadyResolved);
-        deepMerge(json, resolved);
-      }
-      if (json.has("$dynamicRef") && !field.equals("properties")) {
-        final String dynamicRef = json.at("$dynamicRef").asString();
-        final Json dynamicResolved = scopes.stream().map(scope -> scope.resolve(dynamicRef)).peek(it -> System.out.println("Scope: " + it)).map(index::get).filter(Optional::isPresent).map(Optional::get).findFirst().orElseThrow();
-        deepMerge(json, dynamicResolved); // TODO prevent recursive loop
-        // TODO not sure if this is correct !?
-        if (json.has("$id") && !field.equals("properties")) {
-          final String id = json.at("$id").asString();
-          uri = resolveUri(uri, id);
-        }
+        resolveRefs(level + 1, "$ref", resolved, refUri, index, alreadyResolved);
+        json.set("ref", resolved);
       }
       for (final Entry<String, Json> entry : json.asJsonMap().entrySet()) {
-        resolveRefs(level + 1, entry.getKey(), entry.getValue(), uri, index, scopes, alreadyResolved);
+        resolveRefs(level + 1, entry.getKey(), entry.getValue(), uri, index, alreadyResolved);
       }
-      scopes.pollLast();
     } else if (json.isArray()) {
       for (final Json item : json.asJsonList()) {
-        resolveRefs(level + 1, "[]", item, uri, index, scopes, alreadyResolved);
+        resolveRefs(level + 1, "[]", item, uri, index, alreadyResolved);
       }
     }
   }
@@ -916,12 +910,12 @@ public final class JsonSchema implements Json.Schema {
     requireNonNull(uri, "'uri' is null");
     return index.get(uri).orElseGet(() -> {
       try {
-        System.out.println("fetch from " + uri.toString());
-        final Json fetchedJson = Json.read(uri.toURL());
+        System.out.println("fetch from " + JsonUriUtils.getSchemaUri(uri).toString());
+        final Json fetchedJson = Json.read(JsonUriUtils.getSchemaUri(uri).toURL());
         index.add(index(fetchedJson, JsonUriUtils.getSchemaUri(uri)));
         return fetchedJson;
       } catch (final MalformedURLException exception) {
-        throw new RuntimeException(exception);
+        throw new RuntimeException(format("Invalid url: " + uri, exception));
       }
     });
   }
@@ -955,19 +949,29 @@ public final class JsonSchema implements Json.Schema {
     }
   }
 
-  static Instruction compile(Json schemaJson, Map<Json, Instruction> compiled) {
-    return compile(schemaJson, compiled, false);
+  static Instruction compile(Json schemaJson, CompileContext context) {
+    return compile(schemaJson, context, false);
   }
 
-  static Instruction compile(Json schemaJson, Map<Json, Instruction> compiled, boolean ignoreEvaluation) {
+  static Instruction compile(Json schemaJson, CompileContext context, boolean ignoreEvaluation) {
     schemaJson = resolveBooleanSchema(schemaJson);
-    final Instruction result = compiled.get(schemaJson);
-    if (result != null) {
-      return result;
+
+    final Optional<Instruction> compiledOptional = context.getCompiled(schemaJson);
+    if (compiledOptional.isPresent()) {
+      return compiledOptional.get();
     }
     final Sequence seq = new Sequence();
-    compiled.put(schemaJson, seq);
+    context.markCompiled(schemaJson, seq);
     seq.add(new StartContext());
+
+    URI uri;
+    if (schemaJson.has("$id")) {
+      final String id = schemaJson.at("$id").asString();
+      uri = resolveUri(context.getActiveScopeUri(), id);
+    } else {
+      uri = context.getActiveScopeUri();
+    }
+    context.startScope(uri);
 
     if (schemaJson.has("type") && !schemaJson.is("type", "any")) {
       seq.add(new CheckType(schemaJson.at("type").isString() ? Json.array().add(schemaJson.at("type")) : schemaJson.at("type")));
@@ -1027,7 +1031,7 @@ public final class JsonSchema implements Json.Schema {
     if (schemaJson.has("allOf")) {
       final Sequence sub = new Sequence();
       for (final Json x : schemaJson.at("allOf").asJsonList()) {
-        sub.add(new WithContext(compile(x, compiled, false)));
+        sub.add(new WithContext(compile(x, context, false)));
       }
       seq.add(sub);
     }
@@ -1035,7 +1039,7 @@ public final class JsonSchema implements Json.Schema {
       final CheckAny any = new CheckAny();
       any.schema = schemaJson.at("anyOf");
       for (final Json x : any.schema.asJsonList()) {
-        any.alternates.add(new WithContext(compile(x, compiled, false)));
+        any.alternates.add(new WithContext(compile(x, context, false)));
       }
       seq.add(any);
     }
@@ -1043,12 +1047,12 @@ public final class JsonSchema implements Json.Schema {
       final CheckOne any = new CheckOne();
       any.schema = schemaJson.at("oneOf");
       for (final Json x : any.schema.asJsonList()) {
-        any.alternates.add(new WithContext(compile(x, compiled, false)));
+        any.alternates.add(new WithContext(compile(x, context, false)));
       }
       seq.add(any);
     }
     if (schemaJson.has("not")) {
-      seq.add(new CheckNot(compile(schemaJson.at("not"), compiled, true), schemaJson.at("not")));
+      seq.add(new CheckNot(compile(schemaJson.at("not"), context, true), schemaJson.at("not")));
     }
 
     if (schemaJson.has("required") && schemaJson.at("required").isArray()) {
@@ -1059,20 +1063,20 @@ public final class JsonSchema implements Json.Schema {
     final CheckObject objectCheck = new CheckObject();
     if (schemaJson.has("properties")) {
       for (final Map.Entry<String, Json> p : schemaJson.at("properties").asJsonMap().entrySet()) {
-        objectCheck.props.add(new CheckObject.CheckProperty(p.getKey(), compile(p.getValue(), compiled)));
+        objectCheck.props.add(new CheckObject.CheckProperty(p.getKey(), compile(p.getValue(), context)));
       }
     }
     if (schemaJson.has("patternProperties")) {
       for (final Map.Entry<String, Json> p : schemaJson.at("patternProperties").asJsonMap().entrySet()) {
-        objectCheck.patternProps.add(new CheckObject.CheckPatternProperty(p.getKey(), compile(p.getValue(), compiled)));
+        objectCheck.patternProps.add(new CheckObject.CheckPatternProperty(p.getKey(), compile(p.getValue(), context)));
       }
     }
     if (schemaJson.has("additionalProperties")) {
-      objectCheck.additionalSchema = compile(schemaJson.at("additionalProperties"), compiled);
+      objectCheck.additionalSchema = compile(schemaJson.at("additionalProperties"), context);
     }
     final EndContext endContext = new EndContext();
     if (schemaJson.has("unevaluatedProperties")) {
-      endContext.unevaluatedSchema = compile(schemaJson.at("unevaluatedProperties"), compiled);
+      endContext.unevaluatedSchema = compile(schemaJson.at("unevaluatedProperties"), context);
     }
     if (schemaJson.has("minProperties")) {
       objectCheck.min = schemaJson.at("minProperties").asInteger();
@@ -1081,7 +1085,7 @@ public final class JsonSchema implements Json.Schema {
       objectCheck.max = schemaJson.at("maxProperties").asInteger();
     }
     if (schemaJson.has("propertyNames")) {
-      objectCheck.propertyNames = compile(schemaJson.at("propertyNames"), compiled);
+      objectCheck.propertyNames = compile(schemaJson.at("propertyNames"), context);
     }
 
     if (!objectCheck.props.isEmpty() || !objectCheck.patternProps.isEmpty() || objectCheck.additionalSchema != any || objectCheck.min > 0 || objectCheck.max < Integer.MAX_VALUE || objectCheck.propertyNames != null) {
@@ -1090,9 +1094,9 @@ public final class JsonSchema implements Json.Schema {
 
     if (schemaJson.has("if")) {
       final CheckIfThenElse checkIfThenElse = new CheckIfThenElse();
-      checkIfThenElse.ifInstruction = compile(schemaJson.at("if"), compiled, false);
-      checkIfThenElse.thenInstruction = schemaJson.has("then") ? compile(schemaJson.at("then"), compiled) : null;
-      checkIfThenElse.elseInstruction = schemaJson.has("else") ? compile(schemaJson.at("else"), compiled) : null;
+      checkIfThenElse.ifInstruction = compile(schemaJson.at("if"), context, false);
+      checkIfThenElse.thenInstruction = schemaJson.has("then") ? compile(schemaJson.at("then"), context) : null;
+      checkIfThenElse.elseInstruction = schemaJson.has("else") ? compile(schemaJson.at("else"), context) : null;
       seq.add(checkIfThenElse);
     }
 
@@ -1100,20 +1104,20 @@ public final class JsonSchema implements Json.Schema {
     arrayCheck.ignoreEvaluation = ignoreEvaluation;
     if (schemaJson.has("prefixItems")) {
       if (schemaJson.at("prefixItems").isObject()) {
-        arrayCheck.prefixSchema = compile(schemaJson.at("prefixItems"), compiled);
+        arrayCheck.prefixSchema = compile(schemaJson.at("prefixItems"), context);
       } else {
         arrayCheck.prefixSchemas = new ArrayList<Instruction>();
         for (final Json s : schemaJson.at("prefixItems").asJsonList()) {
-          arrayCheck.prefixSchemas.add(compile(s, compiled));
+          arrayCheck.prefixSchemas.add(compile(s, context));
         }
       }
     }
     if (schemaJson.has("additionalItems")) {
-      arrayCheck.additionalSchema = compile(schemaJson.at("additionalItems"), compiled);
+      arrayCheck.additionalSchema = compile(schemaJson.at("additionalItems"), context);
     }
     if (schemaJson.has("items")) {
       if (schemaJson.at("items").isObject() || schemaJson.is("items", true)) {
-        arrayCheck.schema = compile(schemaJson.at("items"), compiled);
+        arrayCheck.schema = compile(schemaJson.at("items"), context);
       } else if (!schemaJson.at("items").asBoolean()) {
         arrayCheck.additionalSchema = null;
         if (arrayCheck.schema == null && arrayCheck.prefixSchemas == null && arrayCheck.prefixSchema == null) {
@@ -1131,7 +1135,7 @@ public final class JsonSchema implements Json.Schema {
       arrayCheck.max = schemaJson.at("maxItems").asInteger();
     }
     if (schemaJson.has("contains")) {
-      arrayCheck.contains = compile(schemaJson.at("contains"), compiled);
+      arrayCheck.contains = compile(schemaJson.at("contains"), context);
     }
     if (schemaJson.has("minContains")) {
       arrayCheck.minContains = schemaJson.at("minContains").asInteger();
@@ -1158,7 +1162,7 @@ public final class JsonSchema implements Json.Schema {
     if (schemaJson.has("exclusiveMaximum")) {
       numberCheck.exclusiveMax = schemaJson.at("exclusiveMaximum").asDouble();
     }
-    if (!Double.isNaN(numberCheck.min) || !Double.isNaN(numberCheck.max) || !Double.isNaN(numberCheck.multipleOf)) {
+    if (!Double.isNaN(numberCheck.min) || !Double.isNaN(numberCheck.max) || !Double.isNaN(numberCheck.multipleOf) || !Double.isNaN(numberCheck.exclusiveMin) || !Double.isNaN(numberCheck.exclusiveMax)) {
       seq.add(numberCheck);
     }
 
@@ -1177,7 +1181,7 @@ public final class JsonSchema implements Json.Schema {
     }
     if (schemaJson.has("dependentSchemas")) {
       for (final Map.Entry<String, Json> e : schemaJson.at("dependentSchemas").asJsonMap().entrySet()) {
-        seq.add(new CheckSchemaDependency(e.getKey(), compile(e.getValue(), compiled)));
+        seq.add(new CheckSchemaDependency(e.getKey(), compile(e.getValue(), context)));
       }
     }
     if (schemaJson.has("dependentRequired")) {
@@ -1185,27 +1189,36 @@ public final class JsonSchema implements Json.Schema {
         seq.add(new CheckPropertyDependency(e.getKey(), e.getValue()));
       }
     }
+    if (schemaJson.has("dependencies")) {
+      for (final Map.Entry<String, Json> e : schemaJson.at("dependencies").asJsonMap().entrySet()) {
+        if (e.getValue().isArray()) {
+          seq.add(new CheckPropertyDependency(e.getKey(), e.getValue()));
+        } else {
+          seq.add(new CheckSchemaDependency(e.getKey(), compile(e.getValue(), context)));
+        }
+      }
+    }
     if (schemaJson.has("unevaluatedItems")) {
-      endContext.unevaluatedSchema = compile(schemaJson.at("unevaluatedItems"), compiled);
+      endContext.unevaluatedSchema = compile(schemaJson.at("unevaluatedItems"), context);
     }
-    seq.add(endContext);
-    return seq;
-  }
+    if (schemaJson.has("ref")) {
+      seq.add(compile(schemaJson.at("ref"), context));
+    }
+    if (schemaJson.has("$dynamicRef")) {
+      final CompileContext dynamicContext = context.fork();
+      final Json resolvedSchema = context.resolveDynamic(schemaJson.at("$dynamicRef").asString());
+      seq.add(new Instruction() {
+        @Override
+        public Json apply(Json json) {
+          return compile(resolvedSchema, dynamicContext).apply(json);
+        }
+      });
+    }
 
-  private static Json deepMerge(Json a, Json b) {
-    if (a != null && b != null && a.isObject() && b.isObject()) {
-      final Json result = a;
-      for (final Map.Entry<String, Json> entry : b.asJsonMap().entrySet()) {
-        result.set(entry.getKey(), deepMerge(a.at(entry.getKey()), entry.getValue()));
-      }
-      return result;
-    } else {
-      if (b != null) {
-        return b;
-      } else {
-        return a;
-      }
-    }
+    seq.add(endContext);
+
+    context.endScope();
+    return seq;
   }
 
   private static Json resolveBooleanSchema(Json resolvedRef) {
@@ -1235,7 +1248,13 @@ public final class JsonSchema implements Json.Schema {
     }
 
     public static URI getSchemaUri(URI uri) {
-      return URI.create(uri.toString().replace("#" + uri.getFragment(), ""));
+      final String uriString = uri.toString();
+      final int index = uriString.indexOf("#");
+      if (index != -1) {
+        return URI.create(uriString.substring(0, index));
+      } else {
+        return uri;
+      }
     }
 
     public static boolean isPointer(String fragment) {
@@ -1243,22 +1262,72 @@ public final class JsonSchema implements Json.Schema {
     }
   }
 
+  private static class CompileContext {
+    private final JsonIndex index;
+    private final Deque<URI> scopes;
+    private final Map<Json, Instruction> compiled;
+
+    public CompileContext(JsonIndex index, Deque<URI> scopes, Map<Json, Instruction> compiled) {
+      this.index = index;
+      this.scopes = scopes;
+      this.compiled = compiled;
+    }
+
+    public CompileContext fork() {
+      return new CompileContext(this.index, new LinkedList<>(this.scopes), this.compiled);
+    }
+
+    public Optional<Instruction> getCompiled(Json json) {
+      return Optional.ofNullable(this.compiled.get(json));
+    }
+
+    public void markCompiled(Json json, Instruction instruction) {
+      this.compiled.put(json, instruction);
+    }
+
+    public void startScope(URI uri) {
+      this.scopes.add(uri);
+    }
+
+    public void endScope() {
+      this.scopes.removeLast();
+    }
+
+    public URI getActiveScopeUri() {
+      return this.scopes.getLast();
+    }
+
+    public Json resolveDynamic(String dynamicRef) {
+      return this.scopes.stream().map(scope -> scope.resolve(dynamicRef)).map(this.index::getDynamic).filter(Optional::isPresent).map(Optional::get).findFirst() //
+          .orElseGet(() -> this.scopes.stream().map(scope -> scope.resolve(dynamicRef)).map(this.index::get).filter(Optional::isPresent).map(Optional::get).findFirst().orElseThrow());
+    }
+  }
+
   private static class JsonIndex {
     private final Map<URI, Json> index;
+    private final Map<URI, Json> dynamicIndex;
 
-    public JsonIndex(Map<URI, Json> index) {
+    public JsonIndex(Map<URI, Json> index, Map<URI, Json> dynamicIndex) {
       requireNonNull(index, "'index' is null");
+      requireNonNull(dynamicIndex, "'dynamicIndex' is null");
       this.index = index;
+      this.dynamicIndex = dynamicIndex;
     }
 
     public void add(JsonIndex other) {
       requireNonNull(other, "'other' is null");
       this.index.putAll(other.index);
+      this.dynamicIndex.putAll(other.dynamicIndex);
     }
 
     public Optional<Json> get(URI uri) {
       requireNonNull(uri, "'uri' is null");
       return Optional.ofNullable(this.index.get(uri));
+    }
+
+    public Optional<Json> getDynamic(URI uri) {
+      requireNonNull(uri, "'uri' is null");
+      return Optional.ofNullable(this.dynamicIndex.get(uri));
     }
   }
 }
