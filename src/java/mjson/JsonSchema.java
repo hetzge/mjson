@@ -22,13 +22,13 @@ import java.util.Set;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
-import mjson.Json.Function;
-
 public final class JsonSchema implements Json.Schema {
 
   private static final int MAX_CHARACTERS = 200;
 
-  static interface Instruction extends Function<Json, Json> {
+  @FunctionalInterface
+  static interface Instruction {
+    Json apply(ValidationContext context, Json json);
   }
 
   static Json maybeError(Json errors, Json error) {
@@ -38,7 +38,7 @@ public final class JsonSchema implements Json.Schema {
   // Anything is valid schema
   static Instruction any = new Instruction() {
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       return null;
     }
   };
@@ -46,7 +46,7 @@ public final class JsonSchema implements Json.Schema {
   // Nothing is valid schema
   static Instruction never = new Instruction() {
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       return Json.make("Never valid");
     }
   };
@@ -54,49 +54,49 @@ public final class JsonSchema implements Json.Schema {
   // Type validation
   static class IsObject implements Instruction {
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       return param.isObject() ? null : Json.make(param.toString(MAX_CHARACTERS));
     }
   }
 
   static class IsArray implements Instruction {
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       return param.isArray() ? null : Json.make(param.toString(MAX_CHARACTERS));
     }
   }
 
   static class IsString implements Instruction {
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       return param.isString() ? null : Json.make(param.toString(MAX_CHARACTERS));
     }
   }
 
   static class IsBoolean implements Instruction {
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       return param.isBoolean() ? null : Json.make(param.toString(MAX_CHARACTERS));
     }
   }
 
   static class IsNull implements Instruction {
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       return param.isNull() ? null : Json.make(param.toString(MAX_CHARACTERS));
     }
   }
 
   static class IsNumber implements Instruction {
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       return param.isNumber() ? null : Json.make(param.toString(MAX_CHARACTERS));
     }
   }
 
   static class IsInteger implements Instruction {
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       return param.isNumber() && ((Number) param.getValue()) instanceof Integer ? null : Json.make(param.toString(MAX_CHARACTERS));
     }
   }
@@ -106,7 +106,7 @@ public final class JsonSchema implements Json.Schema {
     Pattern pattern;
 
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       Json errors = null;
       if (!param.isString()) {
         return errors;
@@ -128,7 +128,7 @@ public final class JsonSchema implements Json.Schema {
     double exclusiveMin = Double.NaN, exclusiveMax = Double.NaN;
 
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       Json errors = null;
       if (!param.isNumber()) {
         return errors;
@@ -172,20 +172,6 @@ public final class JsonSchema implements Json.Schema {
       this.result = null;
     }
 
-    Evaluated join(Evaluated other) {
-      if (!other.isSuccess()) {
-        return this;
-      }
-      final Evaluated result = new Evaluated(this.slots.size());
-      for (final String key : this.slots.keySet()) {
-        result.slots.put(key, other.isSuccess() && other.isEvaluated(key) && other.isSuccess(key) ? Boolean.TRUE : this.slots.get(key));
-      }
-      for (final String key : other.slots.keySet()) {
-        result.slots.put(key, other.isSuccess() && other.isEvaluated(key) && other.isSuccess(key) ? Boolean.TRUE : this.slots.get(key));
-      }
-      return result;
-    }
-
     void setEvaluated(int i, boolean success) {
       this.setEvaluated(String.valueOf(i), success);
     }
@@ -226,32 +212,35 @@ public final class JsonSchema implements Json.Schema {
   }
 
   static class ValidationContext {
-    static final ThreadLocal<ValidationContext> LOCAL = new ThreadLocal<>();
-    final Map<Json, Evaluated> evaluatedByJson;
+    final Map<Json, Map<Json, Evaluated>> evaluatedByJson;
+    Json activeSchemaJson;
+    Json ownerSchemaJson;
 
     ValidationContext() {
       this.evaluatedByJson = new IdentityHashMap<>();
     }
 
-    void addEvaluated(Json json, Evaluated evaluated) {
-      Evaluated existingEvaluated = this.evaluatedByJson.get(json);
-      if (existingEvaluated == null) {
-        existingEvaluated = new Evaluated(json);
-      }
-      this.evaluatedByJson.put(json, existingEvaluated.join(evaluated));
+    Evaluated getOrCreateActiveEvaluated(Json json) {
+      return getOrCreateEvaluated(this.activeSchemaJson, json);
     }
 
-    Evaluated getOrCreateEvaluated(Json json) {
-      return this.evaluatedByJson.computeIfAbsent(json, new java.util.function.Function<Json, Evaluated>() {
-        @Override
-        public Evaluated apply(Json key) {
-          return new Evaluated(key);
-        }
-      });
+    Evaluated getOrCreateEvaluated(Json schemaJson, Json json) {
+      return this.evaluatedByJson.computeIfAbsent(schemaJson, ignore -> new IdentityHashMap<>()).computeIfAbsent(json, Evaluated::new);
     }
 
-    Evaluated getEvaluated(Json json) {
-      return this.evaluatedByJson.get(json);
+    void setActiveSchemaJsons(Json activeSchemaJson, Json ownerSchemaJson) {
+      this.activeSchemaJson = activeSchemaJson;
+      this.ownerSchemaJson = ownerSchemaJson;
+    }
+
+    void markEvaluated(Json param, String key, boolean success) {
+      getOrCreateEvaluated(this.activeSchemaJson, param).setEvaluated(key, success);
+      getOrCreateEvaluated(this.ownerSchemaJson, param).setEvaluated(key, success);
+    }
+
+    void markEvaluated(Json param, int index, boolean success) {
+      getOrCreateEvaluated(this.activeSchemaJson, param).setEvaluated(index, success);
+      getOrCreateEvaluated(this.ownerSchemaJson, param).setEvaluated(index, success);
     }
 
     @Override
@@ -260,27 +249,12 @@ public final class JsonSchema implements Json.Schema {
     }
   }
 
-  static class StartContext implements Instruction {
-
-    @Override
-    public Json apply(Json json) {
-      if (ValidationContext.LOCAL.get() == null) {
-        ValidationContext.LOCAL.set(new ValidationContext());
-      }
-      if (json.isArray()) {
-        ValidationContext.LOCAL.get().addEvaluated(json, new Evaluated(json));
-      }
-      return null;
-    }
-
-  }
-
-  static class EndContext implements Instruction {
+  static class CheckUnevaluatedProperties implements Instruction {
 
     Instruction unevaluatedSchema;
 
     @Override
-    public Json apply(Json json) {
+    public Json apply(ValidationContext context, Json json) {
       Json errors = null;
       if (!json.isArray() && !json.isObject()) {
         return errors;
@@ -288,63 +262,23 @@ public final class JsonSchema implements Json.Schema {
       if (this.unevaluatedSchema == null) {
         return errors;
       }
-      final Evaluated evaluated = ValidationContext.LOCAL.get().getOrCreateEvaluated(json);
-      final Evaluated nestedEvaluated = new Evaluated(json);
+      final Evaluated evaluated = context.getOrCreateActiveEvaluated(json);
       if (json.isArray()) {
         for (int i = 0; i < json.asJsonList().size(); i++) {
           if (!evaluated.isEvaluated(i) || !evaluated.isSuccess(i)) {
-            errors = maybeError(errors, this.unevaluatedSchema.apply(json.at(i)));
-            nestedEvaluated.setEvaluated(i, errors == null);
+            errors = maybeError(errors, this.unevaluatedSchema.apply(context, json.at(i)));
           }
         }
       } else {
         for (final Entry<String, Json> entry : json.asJsonMap().entrySet()) {
           final String key = entry.getKey();
           if (!evaluated.isEvaluated(key) || !evaluated.isSuccess(key)) {
-            errors = maybeError(errors, this.unevaluatedSchema.apply(json.at(key)));
-            System.out.println("Unevaluated: " + errors);
-            nestedEvaluated.setEvaluated(key, errors == null);
+            errors = maybeError(errors, this.unevaluatedSchema.apply(context, json.at(key)));
           }
         }
       }
-      nestedEvaluated.result = errors;
-      ValidationContext.LOCAL.get().addEvaluated(json, nestedEvaluated);
-
-//      for (int i = 0; i < json.asJsonList().size(); i++) {
-//        if (i >= ValidationContext.LOCAL.get().getEvaluatedCount(json)) {
-//          errors = maybeError(errors, this.unevaluatedSchema.apply(json.at(i)));
-//        }
-//      }
-//      ValidationContext.LOCAL.get().setEvaluatedCount(json, json.asJsonList().size());
-
-      // TODO
-      System.out.println(evaluated.toString());
-
       return errors;
     }
-  }
-
-  static class WithContext implements Instruction {
-    final Instruction body;
-
-    WithContext(Instruction body) {
-      this.body = body;
-    }
-
-    @Override
-    public Json apply(Json json) {
-      final ValidationContext parentContext = ValidationContext.LOCAL.get();
-      final ValidationContext activeContext = new ValidationContext();
-      ValidationContext.LOCAL.set(activeContext);
-      final Json errors = this.body.apply(json);
-      final Evaluated evaluated = activeContext.getEvaluated(json);
-      if (evaluated != null) {
-        parentContext.addEvaluated(json, evaluated);
-      }
-      ValidationContext.LOCAL.set(parentContext);
-      return errors;
-    }
-
   }
 
   static class CheckIfThenElse implements Instruction {
@@ -353,15 +287,15 @@ public final class JsonSchema implements Json.Schema {
     Instruction elseInstruction;
 
     @Override
-    public Json apply(Json json) {
+    public Json apply(ValidationContext context, Json json) {
       if (this.ifInstruction != null) {
         System.out.println("if");
-        if (this.ifInstruction.apply(json) == null) {
+        if (this.ifInstruction.apply(context, json) == null) {
           System.out.println("then");
-          return this.thenInstruction != null ? this.thenInstruction.apply(json) : null;
+          return this.thenInstruction != null ? this.thenInstruction.apply(context, json) : null;
         } else {
           System.out.println("else");
-          return this.elseInstruction != null ? this.elseInstruction.apply(json) : null;
+          return this.elseInstruction != null ? this.elseInstruction.apply(context, json) : null;
         }
       } else {
         return null;
@@ -380,69 +314,60 @@ public final class JsonSchema implements Json.Schema {
     int minContains = 1;
     int maxContains = Integer.MAX_VALUE;
     Instruction contains;
-    boolean ignoreEvaluation = false;
 
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       Json errors = null;
       if (!param.isArray()) {
         return errors;
       }
-      final Evaluated evaluated = new Evaluated(param);
-      try {
-        if (this.prefixSchema != null && this.schema == null && this.prefixSchemas == null && this.additionalSchema == null) { // no schema specified
-          return errors;
-        }
-        final int size = param.asJsonList().size();
-        int containsCount = 0;
-        for (int i = 0; i < size; i++) {
-          final Json item = param.at(i);
-          if (this.prefixSchema != null) {
-            final Json error = this.prefixSchema.apply(item);
-            errors = maybeError(errors, error);
-            evaluated.setEvaluated(i, errors == null);
-          } else if (this.prefixSchemas != null && this.prefixSchemas.size() > i) {
-            final Json error = this.prefixSchemas.get(i).apply(item);
-            errors = maybeError(errors, error);
-            evaluated.setEvaluated(i, errors == null);
-          } else if (this.schema != null) {
-            final Json error = this.schema.apply(item);
-            errors = maybeError(errors, error);
-            evaluated.setEvaluated(i, errors == null);
-          } else if (this.additionalSchema != null) {
-            errors = maybeError(errors, this.additionalSchema.apply(item));
-          } else {
-            errors = maybeError(errors, Json.make("Additional items are not permitted: " + item + " in " + param.toString(MAX_CHARACTERS)));
-          }
-          if (this.uniqueitems != null && this.uniqueitems && param.asJsonList().lastIndexOf(item) > i) {
-            errors = maybeError(errors, Json.make("Element " + item + " is duplicate in array."));
-          }
-          if (this.contains != null) {
-            if (this.contains.apply(item) == null) {
-              containsCount++;
-              evaluated.setEvaluated(i, errors == null);
-            }
-            if (containsCount > this.maxContains) {
-              errors = maybeError(errors, Json.make("Array contains to much matches."));
-            }
-          }
-          if (errors != null && !errors.asJsonList().isEmpty()) {
-            break;
-          }
-        }
-        if (this.contains != null && containsCount < this.minContains) {
-          errors = maybeError(errors, Json.make(format("Array requires minimum %s matches", this.minContains)));
-        }
-        if (size < this.min || size > this.max) {
-          errors = maybeError(errors, Json.make("Array  " + param.toString(MAX_CHARACTERS) + " has number of elements outside of the permitted range [" + this.min + "," + this.max + "]."));
-        }
+      if (this.prefixSchema != null && this.schema == null && this.prefixSchemas == null && this.additionalSchema == null) { // no schema specified
         return errors;
-      } finally {
-        evaluated.result = errors;
-        if (!this.ignoreEvaluation) {
-          ValidationContext.LOCAL.get().addEvaluated(param, evaluated);
+      }
+      final int size = param.asJsonList().size();
+      int containsCount = 0;
+      for (int i = 0; i < size; i++) {
+        final Json item = param.at(i);
+        if (this.prefixSchema != null) {
+          final Json error = this.prefixSchema.apply(context, item);
+          errors = maybeError(errors, error);
+          context.markEvaluated(param, i, errors == null);
+        } else if (this.prefixSchemas != null && this.prefixSchemas.size() > i) {
+          final Json error = this.prefixSchemas.get(i).apply(context, item);
+          errors = maybeError(errors, error);
+          context.markEvaluated(param, i, errors == null);
+        } else if (this.schema != null) {
+          final Json error = this.schema.apply(context, item);
+          errors = maybeError(errors, error);
+          context.markEvaluated(param, i, errors == null);
+        } else if (this.additionalSchema != null) {
+          errors = maybeError(errors, this.additionalSchema.apply(context, item));
+        } else {
+          errors = maybeError(errors, Json.make("Additional items are not permitted: " + item + " in " + param.toString(MAX_CHARACTERS)));
+        }
+        if (this.uniqueitems != null && this.uniqueitems && param.asJsonList().lastIndexOf(item) > i) {
+          errors = maybeError(errors, Json.make("Element " + item + " is duplicate in array."));
+        }
+        if (this.contains != null) {
+          if (this.contains.apply(context, item) == null) {
+            containsCount++;
+            context.markEvaluated(param, i, errors == null);
+          }
+          if (containsCount > this.maxContains) {
+            errors = maybeError(errors, Json.make("Array contains to much matches."));
+          }
+        }
+        if (errors != null && !errors.asJsonList().isEmpty()) {
+          break;
         }
       }
+      if (this.contains != null && containsCount < this.minContains) {
+        errors = maybeError(errors, Json.make(format("Array requires minimum %s matches", this.minContains)));
+      }
+      if (size < this.min || size > this.max) {
+        errors = maybeError(errors, Json.make("Array  " + param.toString(MAX_CHARACTERS) + " has number of elements outside of the permitted range [" + this.min + "," + this.max + "]."));
+      }
+      return errors;
     }
   }
 
@@ -454,7 +379,7 @@ public final class JsonSchema implements Json.Schema {
     }
 
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       if (!param.isObject()) {
         return null;
       }
@@ -468,7 +393,7 @@ public final class JsonSchema implements Json.Schema {
 
   static class CheckObject implements Instruction {
     int min = 0, max = Integer.MAX_VALUE;
-    Instruction additionalSchema = any;
+    Instruction additionalSchema;
     ArrayList<CheckProperty> props = new ArrayList<CheckProperty>();
     ArrayList<CheckPatternProperty> patternProps = new ArrayList<CheckPatternProperty>();
     Instruction propertyNames;
@@ -484,13 +409,13 @@ public final class JsonSchema implements Json.Schema {
       }
 
       @Override
-      public Json apply(Json param) {
+      public Json apply(ValidationContext context, Json param) {
         final Json value = param.at(this.name);
         if (value == null) {
           return null;
         } else {
-          final Json errors = this.schema.apply(value);
-          ValidationContext.LOCAL.get().getOrCreateEvaluated(param).setEvaluated(this.name, errors == null);
+          final Json errors = this.schema.apply(context, value);
+          context.markEvaluated(param, this.name, errors == null);
           return errors;
         }
       }
@@ -506,12 +431,12 @@ public final class JsonSchema implements Json.Schema {
         this.schema = schema;
       }
 
-      public Json apply(Json param, Set<String> found) {
+      public Json apply(ValidationContext context, Json param, Set<String> found) {
         Json errors = null;
         for (final Map.Entry<String, Json> e : param.asJsonMap().entrySet()) {
           if (this.pattern.matcher(e.getKey()).find()) {
             found.add(e.getKey());
-            errors = maybeError(errors, new CheckProperty(e.getKey(), this.schema).apply(param));
+            errors = maybeError(errors, new CheckProperty(e.getKey(), this.schema).apply(context, param));
           }
         }
         return errors;
@@ -519,7 +444,7 @@ public final class JsonSchema implements Json.Schema {
     }
 
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       Json errors = null;
       if (!param.isObject()) {
         return errors;
@@ -529,15 +454,16 @@ public final class JsonSchema implements Json.Schema {
         if (param.has(I.name)) {
           checked.add(I.name);
         }
-        errors = maybeError(errors, I.apply(param));
+        errors = maybeError(errors, I.apply(context, param));
       }
       for (final CheckPatternProperty I : this.patternProps) {
-        errors = maybeError(errors, I.apply(param, checked));
+        errors = maybeError(errors, I.apply(context, param, checked));
       }
       if (this.additionalSchema != null) {
         for (final Map.Entry<String, Json> e : param.asJsonMap().entrySet()) {
           if (!checked.contains(e.getKey())) {
-            final Json newErrors = this.additionalSchema.apply(e.getValue());
+            final Json newErrors = this.additionalSchema.apply(context, e.getValue());
+            context.markEvaluated(param, e.getKey(), newErrors == null);
             errors = maybeError(errors, newErrors);
           }
         }
@@ -545,7 +471,8 @@ public final class JsonSchema implements Json.Schema {
       if (this.propertyNames != null) {
         for (final Map.Entry<String, Json> e : param.asJsonMap().entrySet()) {
           final String propertyName = e.getKey();
-          final Json propertyNameErrors = this.propertyNames.apply(Json.make(propertyName));
+          final Json propertyNameErrors = this.propertyNames.apply(context, Json.make(propertyName));
+          context.markEvaluated(param, propertyName, propertyNameErrors == null);
           if (propertyNameErrors != null) {
             errors = maybeError(errors, Json.make(format("Property name '%s' is not valid", propertyName)));
           }
@@ -565,10 +492,10 @@ public final class JsonSchema implements Json.Schema {
     ArrayList<Instruction> seq = new ArrayList<Instruction>();
 
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       Json errors = null;
       for (final Instruction I : this.seq) {
-        errors = maybeError(errors, I.apply(param));
+        errors = maybeError(errors, I.apply(context, param));
       }
       return errors;
     }
@@ -597,7 +524,7 @@ public final class JsonSchema implements Json.Schema {
     }
 
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       final String ptype = param.isString() ? "string" : param.isObject() ? "object" : param.isArray() ? "array" : param.isNumber() ? "number" : param.isNull() ? "null" : "boolean";
       for (final Json type : this.types.asJsonList()) {
         if (type.asString().equals(ptype)) {
@@ -618,7 +545,7 @@ public final class JsonSchema implements Json.Schema {
     }
 
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       for (final Json option : this.theenum.asJsonList()) {
         if (param.equals(option)) {
           return null;
@@ -636,7 +563,7 @@ public final class JsonSchema implements Json.Schema {
     }
 
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       return param.equals(this.value) ? null : Json.array().add("Element " + param.toString(MAX_CHARACTERS) + " is not equal " + param.toString(MAX_CHARACTERS));
     }
   }
@@ -646,10 +573,10 @@ public final class JsonSchema implements Json.Schema {
     Json schema;
 
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       boolean any = false;
       for (final Instruction instruction : this.alternates) {
-        if (instruction.apply(param) == null) {
+        if (instruction.apply(context, param) == null) {
           any = true;
         }
       }
@@ -665,11 +592,11 @@ public final class JsonSchema implements Json.Schema {
     Json schema;
 
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       int matches = 0;
       final Json errors = Json.array();
       for (final Instruction I : this.alternates) {
-        final Json result = I.apply(param);
+        final Json result = I.apply(context, param);
         if (result == null) {
           matches++;
         } else {
@@ -694,8 +621,8 @@ public final class JsonSchema implements Json.Schema {
     }
 
     @Override
-    public Json apply(Json param) {
-      if (this.I.apply(param) != null) {
+    public Json apply(ValidationContext context, Json param) {
+      if (this.I.apply(context, param) != null) {
         return null;
       } else {
         return Json.array().add("Element " + param.toString(MAX_CHARACTERS) + " must NOT conform to the schema " + this.schema.toString(MAX_CHARACTERS));
@@ -713,13 +640,13 @@ public final class JsonSchema implements Json.Schema {
     }
 
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       if (!param.isObject()) {
         return null;
       } else if (!param.has(this.property)) {
         return null;
       } else {
-        return (this.schema.apply(param));
+        return (this.schema.apply(context, param));
       }
     }
   }
@@ -734,7 +661,7 @@ public final class JsonSchema implements Json.Schema {
     }
 
     @Override
-    public Json apply(Json param) {
+    public Json apply(ValidationContext context, Json param) {
       if (!param.isObject()) {
         return null;
       }
@@ -785,7 +712,7 @@ public final class JsonSchema implements Json.Schema {
   @Override
   public Json validate(Json document) {
     final Json result = Json.object("ok", true);
-    final Json errors = this.start.apply(document);
+    final Json errors = this.start.apply(new ValidationContext(), document);
     return errors == null ? result : result.set("errors", errors).set("ok", false);
   }
 
@@ -800,7 +727,7 @@ public final class JsonSchema implements Json.Schema {
     resolveRefs(0, "root", json, rootUri, index, new IdentityHashMap<>());
     final Deque<URI> scopes = new LinkedList<>();
     scopes.add(rootUri);
-    return new JsonSchema(json, compile(json, new CompileContext(index, scopes, new IdentityHashMap<>())));
+    return new JsonSchema(json, compile(json, json, new CompileContext(index, scopes, new IdentityHashMap<>())));
   }
 
   private static JsonIndex index(Json json, URI rootUri) {
@@ -949,12 +876,9 @@ public final class JsonSchema implements Json.Schema {
     }
   }
 
-  static Instruction compile(Json schemaJson, CompileContext context) {
-    return compile(schemaJson, context, false);
-  }
-
-  static Instruction compile(Json schemaJson, CompileContext context, boolean ignoreEvaluation) {
+  static Instruction compile(Json schemaJson, Json ownerSchemaJson, CompileContext context) {
     schemaJson = resolveBooleanSchema(schemaJson);
+    final Json activeSchemaJson = schemaJson;
 
     final Optional<Instruction> compiledOptional = context.getCompiled(schemaJson);
     if (compiledOptional.isPresent()) {
@@ -962,7 +886,6 @@ public final class JsonSchema implements Json.Schema {
     }
     final Sequence seq = new Sequence();
     context.markCompiled(schemaJson, seq);
-    seq.add(new StartContext());
 
     URI uri;
     if (schemaJson.has("$id")) {
@@ -984,7 +907,7 @@ public final class JsonSchema implements Json.Schema {
         seq.add(checkString);
       } else {
         if (schemaJson.is("format", "uri")) {
-          seq.add(json -> {
+          seq.add((evaluationContext, json) -> {
             if (!json.isString()) {
               return null;
             }
@@ -996,7 +919,7 @@ public final class JsonSchema implements Json.Schema {
             }
           });
         } else if (schemaJson.is("format", "idn-hostname")) {
-          seq.add(json -> {
+          seq.add((evaluationContext, json) -> {
             if (!json.isString()) {
               return null;
             }
@@ -1008,7 +931,7 @@ public final class JsonSchema implements Json.Schema {
             }
           });
         } else if (schemaJson.is("format", "uri-reference")) {
-          seq.add(json -> {
+          seq.add((evaluationContext, json) -> {
             if (!json.isString()) {
               return null;
             }
@@ -1030,29 +953,30 @@ public final class JsonSchema implements Json.Schema {
     }
     if (schemaJson.has("allOf")) {
       final Sequence sub = new Sequence();
-      for (final Json x : schemaJson.at("allOf").asJsonList()) {
-        sub.add(new WithContext(compile(x, context, false)));
+      for (final Json allOfSchemaJson : schemaJson.at("allOf").asJsonList()) {
+        sub.add(compile(allOfSchemaJson, schemaJson, context));
       }
       seq.add(sub);
     }
     if (schemaJson.has("anyOf")) {
       final CheckAny any = new CheckAny();
       any.schema = schemaJson.at("anyOf");
-      for (final Json x : any.schema.asJsonList()) {
-        any.alternates.add(new WithContext(compile(x, context, false)));
+      for (final Json anySchemaJson : any.schema.asJsonList()) {
+        any.alternates.add(compile(anySchemaJson, schemaJson, context));
       }
       seq.add(any);
     }
     if (schemaJson.has("oneOf")) {
       final CheckOne any = new CheckOne();
       any.schema = schemaJson.at("oneOf");
-      for (final Json x : any.schema.asJsonList()) {
-        any.alternates.add(new WithContext(compile(x, context, false)));
+      for (final Json oneOfSchemaJson : any.schema.asJsonList()) {
+        any.alternates.add(compile(oneOfSchemaJson, schemaJson, context));
       }
       seq.add(any);
     }
     if (schemaJson.has("not")) {
-      seq.add(new CheckNot(compile(schemaJson.at("not"), context, true), schemaJson.at("not")));
+      final Json notSchemaJson = schemaJson.at("not");
+      seq.add(new CheckNot(compile(notSchemaJson, schemaJson, context), schemaJson.at("not")));
     }
 
     if (schemaJson.has("required") && schemaJson.at("required").isArray()) {
@@ -1063,20 +987,20 @@ public final class JsonSchema implements Json.Schema {
     final CheckObject objectCheck = new CheckObject();
     if (schemaJson.has("properties")) {
       for (final Map.Entry<String, Json> p : schemaJson.at("properties").asJsonMap().entrySet()) {
-        objectCheck.props.add(new CheckObject.CheckProperty(p.getKey(), compile(p.getValue(), context)));
+        objectCheck.props.add(new CheckObject.CheckProperty(p.getKey(), compile(p.getValue(), schemaJson, context)));
       }
     }
     if (schemaJson.has("patternProperties")) {
       for (final Map.Entry<String, Json> p : schemaJson.at("patternProperties").asJsonMap().entrySet()) {
-        objectCheck.patternProps.add(new CheckObject.CheckPatternProperty(p.getKey(), compile(p.getValue(), context)));
+        objectCheck.patternProps.add(new CheckObject.CheckPatternProperty(p.getKey(), compile(p.getValue(), schemaJson, context)));
       }
     }
     if (schemaJson.has("additionalProperties")) {
-      objectCheck.additionalSchema = compile(schemaJson.at("additionalProperties"), context);
+      objectCheck.additionalSchema = compile(schemaJson.at("additionalProperties"), schemaJson, context);
     }
-    final EndContext endContext = new EndContext();
+    final CheckUnevaluatedProperties unevaluatedCheck = new CheckUnevaluatedProperties();
     if (schemaJson.has("unevaluatedProperties")) {
-      endContext.unevaluatedSchema = compile(schemaJson.at("unevaluatedProperties"), context);
+      unevaluatedCheck.unevaluatedSchema = compile(schemaJson.at("unevaluatedProperties"), schemaJson, context);
     }
     if (schemaJson.has("minProperties")) {
       objectCheck.min = schemaJson.at("minProperties").asInteger();
@@ -1085,7 +1009,7 @@ public final class JsonSchema implements Json.Schema {
       objectCheck.max = schemaJson.at("maxProperties").asInteger();
     }
     if (schemaJson.has("propertyNames")) {
-      objectCheck.propertyNames = compile(schemaJson.at("propertyNames"), context);
+      objectCheck.propertyNames = compile(schemaJson.at("propertyNames"), schemaJson, context);
     }
 
     if (!objectCheck.props.isEmpty() || !objectCheck.patternProps.isEmpty() || objectCheck.additionalSchema != any || objectCheck.min > 0 || objectCheck.max < Integer.MAX_VALUE || objectCheck.propertyNames != null) {
@@ -1094,30 +1018,29 @@ public final class JsonSchema implements Json.Schema {
 
     if (schemaJson.has("if")) {
       final CheckIfThenElse checkIfThenElse = new CheckIfThenElse();
-      checkIfThenElse.ifInstruction = compile(schemaJson.at("if"), context, false);
-      checkIfThenElse.thenInstruction = schemaJson.has("then") ? compile(schemaJson.at("then"), context) : null;
-      checkIfThenElse.elseInstruction = schemaJson.has("else") ? compile(schemaJson.at("else"), context) : null;
+      checkIfThenElse.ifInstruction = compile(schemaJson.at("if"), schemaJson, context);
+      checkIfThenElse.thenInstruction = schemaJson.has("then") ? compile(schemaJson.at("then"), schemaJson, context) : null;
+      checkIfThenElse.elseInstruction = schemaJson.has("else") ? compile(schemaJson.at("else"), schemaJson, context) : null;
       seq.add(checkIfThenElse);
     }
 
     final CheckArray arrayCheck = new CheckArray();
-    arrayCheck.ignoreEvaluation = ignoreEvaluation;
     if (schemaJson.has("prefixItems")) {
       if (schemaJson.at("prefixItems").isObject()) {
-        arrayCheck.prefixSchema = compile(schemaJson.at("prefixItems"), context);
+        arrayCheck.prefixSchema = compile(schemaJson.at("prefixItems"), schemaJson, context);
       } else {
         arrayCheck.prefixSchemas = new ArrayList<Instruction>();
-        for (final Json s : schemaJson.at("prefixItems").asJsonList()) {
-          arrayCheck.prefixSchemas.add(compile(s, context));
+        for (final Json prefixItemSchemaJson : schemaJson.at("prefixItems").asJsonList()) {
+          arrayCheck.prefixSchemas.add(compile(prefixItemSchemaJson, schemaJson, context));
         }
       }
     }
     if (schemaJson.has("additionalItems")) {
-      arrayCheck.additionalSchema = compile(schemaJson.at("additionalItems"), context);
+      arrayCheck.additionalSchema = compile(schemaJson.at("additionalItems"), schemaJson, context);
     }
     if (schemaJson.has("items")) {
       if (schemaJson.at("items").isObject() || schemaJson.is("items", true)) {
-        arrayCheck.schema = compile(schemaJson.at("items"), context);
+        arrayCheck.schema = compile(schemaJson.at("items"), schemaJson, context);
       } else if (!schemaJson.at("items").asBoolean()) {
         arrayCheck.additionalSchema = null;
         if (arrayCheck.schema == null && arrayCheck.prefixSchemas == null && arrayCheck.prefixSchema == null) {
@@ -1135,7 +1058,7 @@ public final class JsonSchema implements Json.Schema {
       arrayCheck.max = schemaJson.at("maxItems").asInteger();
     }
     if (schemaJson.has("contains")) {
-      arrayCheck.contains = compile(schemaJson.at("contains"), context);
+      arrayCheck.contains = compile(schemaJson.at("contains"), schemaJson, context);
     }
     if (schemaJson.has("minContains")) {
       arrayCheck.minContains = schemaJson.at("minContains").asInteger();
@@ -1181,7 +1104,7 @@ public final class JsonSchema implements Json.Schema {
     }
     if (schemaJson.has("dependentSchemas")) {
       for (final Map.Entry<String, Json> e : schemaJson.at("dependentSchemas").asJsonMap().entrySet()) {
-        seq.add(new CheckSchemaDependency(e.getKey(), compile(e.getValue(), context)));
+        seq.add(new CheckSchemaDependency(e.getKey(), compile(e.getValue(), schemaJson, context)));
       }
     }
     if (schemaJson.has("dependentRequired")) {
@@ -1194,31 +1117,43 @@ public final class JsonSchema implements Json.Schema {
         if (e.getValue().isArray()) {
           seq.add(new CheckPropertyDependency(e.getKey(), e.getValue()));
         } else {
-          seq.add(new CheckSchemaDependency(e.getKey(), compile(e.getValue(), context)));
+          seq.add(new CheckSchemaDependency(e.getKey(), compile(e.getValue(), schemaJson, context)));
         }
       }
     }
     if (schemaJson.has("unevaluatedItems")) {
-      endContext.unevaluatedSchema = compile(schemaJson.at("unevaluatedItems"), context);
+      unevaluatedCheck.unevaluatedSchema = compile(schemaJson.at("unevaluatedItems"), schemaJson, context);
     }
     if (schemaJson.has("ref")) {
-      seq.add(compile(schemaJson.at("ref"), context));
+      seq.add(compile(schemaJson.at("ref"), schemaJson, context));
     }
     if (schemaJson.has("$dynamicRef")) {
       final CompileContext dynamicContext = context.fork();
       final Json resolvedSchema = context.resolveDynamic(schemaJson.at("$dynamicRef").asString());
+      final Json parentSchemaJson = schemaJson;
       seq.add(new Instruction() {
         @Override
-        public Json apply(Json json) {
-          return compile(resolvedSchema, dynamicContext).apply(json);
+        public Json apply(ValidationContext context, Json json) {
+          return compile(resolvedSchema, parentSchemaJson, dynamicContext).apply(context, json);
         }
       });
     }
 
-    seq.add(endContext);
+    seq.add(unevaluatedCheck);
 
     context.endScope();
-    return seq;
+
+    return new Instruction() {
+      @Override
+      public Json apply(ValidationContext context, Json json) {
+        final Json beforeActiveSchemaJson = context.activeSchemaJson;
+        final Json beforeOwnerSchemaJson = context.ownerSchemaJson;
+        context.setActiveSchemaJsons(activeSchemaJson, ownerSchemaJson);
+        final Json result = seq.apply(context, json);
+        context.setActiveSchemaJsons(beforeActiveSchemaJson, beforeOwnerSchemaJson);
+        return result;
+      }
+    };
   }
 
   private static Json resolveBooleanSchema(Json resolvedRef) {
