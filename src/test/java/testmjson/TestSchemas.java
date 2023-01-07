@@ -5,6 +5,7 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.MalformedURLException;
 import java.net.URISyntaxException;
 import java.util.HashMap;
 import java.util.Map;
@@ -13,6 +14,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import mjson.Json;
+import mjson.JsonSchema;
 
 /**
  *
@@ -96,7 +98,7 @@ public class TestSchemas {
    * @param incorrect
    */
   public void doTest(Json schema, Json correct, Json incorrect) {
-    doTest(Json.schema(schema), correct, incorrect);
+    doTest(JsonSchema.initialize(schema), correct, incorrect);
   }
 
   /**
@@ -107,7 +109,7 @@ public class TestSchemas {
    * @param correct
    * @param incorrect
    */
-  public void doTest(Json.Schema schema, Json correct, Json incorrect) {
+  public void doTest(JsonSchema schema, Json correct, Json incorrect) {
     Json ok = Json.nil();
     if (correct != null) {
       ok = schema.validate(correct);
@@ -142,8 +144,8 @@ public class TestSchemas {
   }
 
   @Test
-  public void testSchemaWithDefs() throws URISyntaxException {
-    final Json.Schema schema = Json.schema(TU.resource("/schemas_data/schema_with_defs.json").toURI());
+  public void testSchemaWithDefs() throws URISyntaxException, MalformedURLException {
+    final JsonSchema schema = JsonSchema.initialize(TU.resource("/schemas_data/schema_with_defs.json").toURI().toURL());
     final Json data = Json.array(Json.object());
     final Json result = schema.validate(data);
     if (!result.is("ok", true)) {
@@ -153,8 +155,8 @@ public class TestSchemas {
   }
 
   @Test
-  public void testOpenCirmSchema() throws URISyntaxException {
-    final Json.Schema schema = Json.schema(TU.resource("/schemas_data/json_case_schema.json").toURI());
+  public void testOpenCirmSchema() throws URISyntaxException, MalformedURLException {
+    final JsonSchema schema = JsonSchema.initialize(TU.resource("/schemas_data/json_case_schema.json").toURI().toURL());
     final Json data = Json.read(TU.resource("/schemas_data/json_data.json"));
     final Json result = schema.validate(data);
     if (!result.is("ok", true)) {

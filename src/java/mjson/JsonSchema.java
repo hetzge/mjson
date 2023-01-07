@@ -4,10 +4,12 @@ import static java.lang.Integer.parseInt;
 import static java.lang.String.format;
 import static java.util.Objects.requireNonNull;
 import static java.util.function.Predicate.not;
+import static mjson.Instruction.maybeError;
 
 import java.net.IDN;
 import java.net.MalformedURLException;
 import java.net.URI;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.Deque;
 import java.util.HashMap;
@@ -20,14 +22,626 @@ import java.util.Optional;
 import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
-public final class JsonSchema implements Json.Schema {
+import mjson.Instruction.CheckAny;
+import mjson.Instruction.CheckArray;
+import mjson.Instruction.CheckEnum;
+import mjson.Instruction.CheckEquals;
+import mjson.Instruction.CheckIfThenElse;
+import mjson.Instruction.CheckNot;
+import mjson.Instruction.CheckNumber;
+import mjson.Instruction.CheckObject;
+import mjson.Instruction.CheckOne;
+import mjson.Instruction.CheckPropertyDependency;
+import mjson.Instruction.CheckPropertyPresent;
+import mjson.Instruction.CheckSchemaDependency;
+import mjson.Instruction.CheckString;
+import mjson.Instruction.CheckType;
+import mjson.Instruction.CheckUnevaluatedProperties;
+import mjson.Instruction.ValidationContext;
 
-  private static final int MAX_CHARACTERS = 200;
+public interface JsonSchema {
 
-  @FunctionalInterface
-  static interface Instruction {
-    Json apply(ValidationContext context, Json json);
+  /**
+   * <p>
+   * Validate a JSON document according to this schema. The validations attempts
+   * to proceed even in the face of errors. The return value is always a
+   * <code>Json.object</code> containing the boolean property <code>ok</code>.
+   * When <code>ok</code> is <code>true</code>, the return object contains nothing
+   * else. When it is <code>false</code>, the return object contains a property
+   * <code>errors</code> which is an array of error messages for all detected
+   * schema violations.
+   * </p>
+   *
+   * @param document The input document.
+   * @return <code>{"ok":true}</code> or
+   *         <code>{"ok":false, errors:["msg1", "msg2", ...]}</code>
+   */
+  Json validate(Json document);
+
+  /**
+   * <p>
+   * Return the JSON representation of the schema.
+   * </p>
+   */
+  Json toJson();
+
+  public static JsonSchema initialize(URL url) {
+    return initialize(Json.read(url));
   }
+
+  public static JsonSchema initialize(Json json) {
+    final URI rootUri = URI.create("http://__default__.nix");
+    final JsonIndex index = index(json, rootUri);
+    resolveRefs(0, "root", json, rootUri, index, new IdentityHashMap<>());
+    final Deque<URI> scopes = new LinkedList<>();
+    scopes.add(rootUri);
+    return new JsonSchemaImpl(json, compile(json, json, new CompileContext(index, scopes, new IdentityHashMap<>())));
+  }
+
+  private static JsonIndex index(Json json, URI rootUri) {
+    final Map<URI, Json> index = new HashMap<>();
+    index.put(rootUri, json);
+    index.put(rootUri.resolve("#"), json);
+    final Map<URI, Json> dynamicIndex = new HashMap<>();
+    initIndex(0, "root", index, dynamicIndex, json, rootUri, new IdentityHashMap<>());
+    return new JsonIndex(index, dynamicIndex);
+  }
+
+  private static void initIndex(int level, String field, Map<URI, Json> index, Map<URI, Json> dynamicIndex, Json json, URI uri, Map<Json, Json> alreadyIndexed) {
+    System.out.println("<i>" + "-".repeat(level * 2) + field);
+    if (alreadyIndexed.containsKey(json)) {
+      // Already indexed
+      return;
+    } else {
+      // Mark already indexed
+      alreadyIndexed.put(json, json);
+    }
+    if (json.isObject()) {
+      if (json.has("$id") && !field.equals("properties")) {
+        final String id = json.at("$id").asString();
+        uri = resolveUri(uri, id);
+        System.out.println("index " + uri.toString());
+        index.put(uri, json);
+      }
+      if (json.has("$anchor") && !field.equals("properties")) {
+        final String anchor = json.at("$anchor").asString();
+        final URI anchorUri = resolveUri(uri, "#" + anchor);
+        System.out.println("index " + anchorUri.toString());
+        index.put(anchorUri, json);
+      }
+      if (json.has("$dynamicAnchor") && !field.equals("properties")) {
+        final String dynamicAnchor = json.at("$dynamicAnchor").asString();
+        final URI dynamicAnchorUri = resolveUri(uri, "#" + dynamicAnchor);
+        System.out.println("index dynamic " + dynamicAnchorUri.toString());
+        dynamicIndex.put(dynamicAnchorUri, json);
+        System.out.println("index " + dynamicAnchorUri.toString());
+        index.put(dynamicAnchorUri, json);
+      }
+      for (final Entry<String, Json> entry : json.asJsonMap().entrySet()) {
+        initIndex(level + 1, entry.getKey(), index, dynamicIndex, entry.getValue(), uri, alreadyIndexed);
+      }
+    } else if (json.isArray()) {
+      for (final Json item : json.asJsonList()) {
+        initIndex(level + 1, "[]", index, dynamicIndex, item, uri, alreadyIndexed);
+      }
+    }
+  }
+
+  static URI resolveUri(URI uri, String sub) {
+    if (uri.getScheme() != null && uri.getScheme().equals("urn") && sub.startsWith("#")) {
+      return URI.create(uri.toString() + sub);
+    } else {
+      System.out.println("resolve " + uri + " with " + sub + " = " + uri.resolve(sub));
+      return uri.resolve(sub);
+    }
+  }
+
+  private static void resolveRefs(int level, String field, Json json, URI uri, JsonIndex index, Map<Json, Json> alreadyResolved) {
+    System.out.println("<r>" + "-".repeat(level * 2) + field);
+    if (alreadyResolved.containsKey(json)) {
+      // Already resolved
+      return;
+    } else {
+      // Mark already resolved
+      alreadyResolved.put(json, json);
+    }
+    if (json.isObject()) {
+      if (json.has("$id") && !field.equals("properties")) {
+        final String id = json.at("$id").asString();
+        uri = resolveUri(uri, id);
+      }
+      if (json.has("$ref") && !field.equals("properties")) {
+        final String ref = json.at("$ref").asString();
+        json.delAt("$ref"); // mark as resolved
+        final URI refUri = resolveUri(uri, ref);
+        final Json resolved = resolve(index, refUri);
+        resolveRefs(level + 1, "$ref", resolved, refUri, index, alreadyResolved);
+        json.set("ref", resolved);
+      }
+      for (final Entry<String, Json> entry : json.asJsonMap().entrySet()) {
+        resolveRefs(level + 1, entry.getKey(), entry.getValue(), uri, index, alreadyResolved);
+      }
+    } else if (json.isArray()) {
+      for (final Json item : json.asJsonList()) {
+        resolveRefs(level + 1, "[]", item, uri, index, alreadyResolved);
+      }
+    }
+  }
+
+  public static Json resolve(JsonIndex index, URI uri) {
+    requireNonNull(index, "'index' is null");
+    requireNonNull(uri, "'uri' is null");
+    return JsonUriUtils.getPointer(uri).map(pointer -> {
+      return resolvePointer(resolveInIndex(index, JsonUriUtils.getSchemaUri(uri)), pointer);
+    }).or(() -> JsonUriUtils.getAnchor(uri).map(anchor -> {
+      return resolveInIndex(index, uri);
+    })).or(() -> {
+      return Optional.of(resolveInIndex(index, JsonUriUtils.getSchemaUri(uri)));
+    }).orElseThrow(() -> new RuntimeException(format("Failed to resolve '%s'. Not found.", uri)));
+  }
+
+  private static Json resolveInIndex(JsonIndex index, URI uri) {
+    requireNonNull(index, "'index' is null");
+    requireNonNull(uri, "'uri' is null");
+    return index.get(uri).orElseGet(() -> {
+      try {
+        System.out.println("fetch from " + JsonUriUtils.getSchemaUri(uri).toString());
+        final Json fetchedJson = Json.read(JsonUriUtils.getSchemaUri(uri).toURL());
+        index.add(index(fetchedJson, JsonUriUtils.getSchemaUri(uri)));
+        return fetchedJson;
+      } catch (final MalformedURLException exception) {
+        throw new RuntimeException(format("Invalid url: " + uri, exception));
+      }
+    });
+  }
+
+  private static Json resolvePointer(Json json, String pointer) {
+    requireNonNull(json, "'json' is null");
+    requireNonNull(pointer, "'pointer' is null");
+    if (pointer.isBlank()) {
+      return json;
+    }
+    final String[] steps = pointer.split("/");
+    Json result = json;
+    for (final String step : steps) {
+      if (step.isBlank()) {
+        continue;
+      }
+      result = getAt(result, step.replace("~1", "/").replace("~0", "~"));
+    }
+    return result;
+  }
+
+  private static Json getAt(Json json, String at) {
+    requireNonNull(json, format("Try to get at '%s' on null object", at));
+    requireNonNull(at, "'at' is null");
+    if (json.isArray()) {
+      return json.at(parseInt(at));
+    } else if (json.isObject()) {
+      return json.at(at);
+    } else {
+      throw new RuntimeException(format("Can't resolve at '%s' in document '%s'", at, json.toString(200)));
+    }
+  }
+
+  static Instruction compile(Json schemaJson, Json ownerSchemaJson, CompileContext context) {
+    schemaJson = resolveBooleanSchema(schemaJson);
+    final Json activeSchemaJson = schemaJson;
+
+    final Optional<Instruction> compiledOptional = context.getCompiled(schemaJson);
+    if (compiledOptional.isPresent()) {
+      return compiledOptional.get();
+    }
+    final Instruction.Sequence seq = new Instruction.Sequence();
+    context.markCompiled(schemaJson, seq);
+
+    URI uri;
+    if (schemaJson.has("$id")) {
+      final String id = schemaJson.at("$id").asString();
+      uri = resolveUri(context.getActiveScopeUri(), id);
+    } else {
+      uri = context.getActiveScopeUri();
+    }
+    context.startScope(uri);
+
+    if (schemaJson.has("type") && !schemaJson.is("type", "any")) {
+      seq.add(new CheckType(schemaJson.at("type").isString() ? Json.array().add(schemaJson.at("type")) : schemaJson.at("type")));
+    }
+    if (schemaJson.has("format")) {
+      final Pattern pattern = JsonSchemaConstants.PATTERN_BY_FORMAT.get(schemaJson.at("format").asString());
+      if (pattern != null) {
+        final CheckString checkString = new CheckString();
+        checkString.pattern = pattern;
+        seq.add(checkString);
+      } else {
+        if (schemaJson.is("format", "uri")) {
+          seq.add((evaluationContext, json) -> {
+            if (!json.isString()) {
+              return null;
+            }
+            try {
+              URI.create(json.asString());
+              return null;
+            } catch (final IllegalArgumentException e) {
+              return Json.array().add("Element " + json.toString(JsonSchemaConstants.MAX_CHARACTERS) + " is not a valid uri");
+            }
+          });
+        } else if (schemaJson.is("format", "idn-hostname")) {
+          seq.add((evaluationContext, json) -> {
+            if (!json.isString()) {
+              return null;
+            }
+            try {
+              IDN.toASCII(json.asString());
+              return null;
+            } catch (final IllegalArgumentException e) {
+              return Json.array().add("Element " + json.toString(JsonSchemaConstants.MAX_CHARACTERS) + " is not a valid idn hostname");
+            }
+          });
+        } else if (schemaJson.is("format", "uri-reference")) {
+          seq.add((evaluationContext, json) -> {
+            if (!json.isString()) {
+              return null;
+            }
+            try {
+              URI.create(json.asString());
+              return null;
+            } catch (final IllegalArgumentException e) {
+              return Json.array().add("Element " + json.toString(JsonSchemaConstants.MAX_CHARACTERS) + " is not a valid uri reference");
+            }
+          });
+        }
+      }
+    }
+    if (schemaJson.has("const")) {
+      seq.add(new CheckEquals(schemaJson.at("const")));
+    }
+    if (schemaJson.has("enum")) {
+      seq.add(new CheckEnum(schemaJson.at("enum")));
+    }
+    if (schemaJson.has("allOf")) {
+      final Instruction.Sequence sub = new Instruction.Sequence();
+      for (final Json allOfSchemaJson : schemaJson.at("allOf").asJsonList()) {
+        sub.add(compile(allOfSchemaJson, ownerSchemaJson, context));
+      }
+      seq.add(sub);
+    }
+    if (schemaJson.has("anyOf")) {
+      final CheckAny any = new CheckAny();
+      any.schema = schemaJson.at("anyOf");
+      for (final Json anySchemaJson : any.schema.asJsonList()) {
+        any.alternates.add(compile(anySchemaJson, ownerSchemaJson, context));
+      }
+      seq.add(any);
+    }
+    if (schemaJson.has("oneOf")) {
+      final CheckOne any = new CheckOne();
+      any.schema = schemaJson.at("oneOf");
+      for (final Json oneOfSchemaJson : any.schema.asJsonList()) {
+        any.alternates.add(compile(oneOfSchemaJson, ownerSchemaJson, context));
+      }
+      seq.add(any);
+    }
+    if (schemaJson.has("not")) {
+      final Json notSchemaJson = schemaJson.at("not");
+      seq.add(new CheckNot(compile(notSchemaJson, schemaJson, context), schemaJson.at("not")));
+    }
+
+    if (schemaJson.has("required") && schemaJson.at("required").isArray()) {
+      for (final Json p : schemaJson.at("required").asJsonList()) {
+        seq.add(new CheckPropertyPresent(p.asString()));
+      }
+    }
+    final CheckObject objectCheck = new CheckObject();
+    if (schemaJson.has("properties")) {
+      for (final Map.Entry<String, Json> p : schemaJson.at("properties").asJsonMap().entrySet()) {
+        objectCheck.props.add(new Instruction.CheckObject.CheckProperty(p.getKey(), compile(p.getValue(), ownerSchemaJson, context)));
+      }
+    }
+    if (schemaJson.has("patternProperties")) {
+      for (final Map.Entry<String, Json> p : schemaJson.at("patternProperties").asJsonMap().entrySet()) {
+        objectCheck.patternProps.add(new CheckObject.CheckPatternProperty(p.getKey(), compile(p.getValue(), ownerSchemaJson, context)));
+      }
+    }
+    if (schemaJson.has("additionalProperties")) {
+      objectCheck.additionalSchema = compile(schemaJson.at("additionalProperties"), ownerSchemaJson, context);
+    }
+    final CheckUnevaluatedProperties unevaluatedCheck = new CheckUnevaluatedProperties();
+    if (schemaJson.has("unevaluatedProperties")) {
+      unevaluatedCheck.unevaluatedSchema = compile(schemaJson.at("unevaluatedProperties"), ownerSchemaJson, context);
+    }
+    if (schemaJson.has("minProperties")) {
+      objectCheck.min = schemaJson.at("minProperties").asInteger();
+    }
+    if (schemaJson.has("maxProperties")) {
+      objectCheck.max = schemaJson.at("maxProperties").asInteger();
+    }
+    if (schemaJson.has("propertyNames")) {
+      objectCheck.propertyNames = compile(schemaJson.at("propertyNames"), ownerSchemaJson, context);
+    }
+
+    if (!objectCheck.props.isEmpty() || !objectCheck.patternProps.isEmpty() || objectCheck.additionalSchema != Instruction.any || objectCheck.min > 0 || objectCheck.max < Integer.MAX_VALUE || objectCheck.propertyNames != null) {
+      seq.add(objectCheck);
+    }
+
+    if (schemaJson.has("if")) {
+      final CheckIfThenElse checkIfThenElse = new CheckIfThenElse();
+      checkIfThenElse.ifInstruction = compile(schemaJson.at("if"), ownerSchemaJson, context);
+      checkIfThenElse.thenInstruction = schemaJson.has("then") ? compile(schemaJson.at("then"), ownerSchemaJson, context) : null;
+      checkIfThenElse.elseInstruction = schemaJson.has("else") ? compile(schemaJson.at("else"), ownerSchemaJson, context) : null;
+      seq.add(checkIfThenElse);
+    }
+
+    final CheckArray arrayCheck = new CheckArray();
+    if (schemaJson.has("prefixItems")) {
+      if (schemaJson.at("prefixItems").isObject()) {
+        arrayCheck.prefixSchema = compile(schemaJson.at("prefixItems"), ownerSchemaJson, context);
+      } else {
+        arrayCheck.prefixSchemas = new ArrayList<>();
+        for (final Json prefixItemSchemaJson : schemaJson.at("prefixItems").asJsonList()) {
+          arrayCheck.prefixSchemas.add(compile(prefixItemSchemaJson, ownerSchemaJson, context));
+        }
+      }
+    }
+    if (schemaJson.has("additionalItems")) {
+      arrayCheck.additionalSchema = compile(schemaJson.at("additionalItems"), ownerSchemaJson, context);
+    }
+    if (schemaJson.has("items")) {
+      if (schemaJson.at("items").isObject() || schemaJson.is("items", true)) {
+        arrayCheck.schema = compile(schemaJson.at("items"), ownerSchemaJson, context);
+      } else if (!schemaJson.at("items").asBoolean()) {
+        arrayCheck.additionalSchema = null;
+        if (arrayCheck.schema == null && arrayCheck.prefixSchemas == null && arrayCheck.prefixSchema == null) {
+          arrayCheck.schema = Instruction.never;
+        }
+      }
+    }
+    if (schemaJson.has("uniqueItems")) {
+      arrayCheck.uniqueitems = schemaJson.at("uniqueItems").asBoolean();
+    }
+    if (schemaJson.has("minItems")) {
+      arrayCheck.min = schemaJson.at("minItems").asInteger();
+    }
+    if (schemaJson.has("maxItems")) {
+      arrayCheck.max = schemaJson.at("maxItems").asInteger();
+    }
+    if (schemaJson.has("contains")) {
+      arrayCheck.contains = compile(schemaJson.at("contains"), ownerSchemaJson, context);
+    }
+    if (schemaJson.has("minContains")) {
+      arrayCheck.minContains = schemaJson.at("minContains").asInteger();
+    }
+    if (schemaJson.has("maxContains")) {
+      arrayCheck.maxContains = schemaJson.at("maxContains").asInteger();
+    }
+    if (arrayCheck.contains != null || arrayCheck.schema != null || arrayCheck.prefixSchemas != null || arrayCheck.additionalSchema != Instruction.any || arrayCheck.uniqueitems != null || arrayCheck.max < Integer.MAX_VALUE || arrayCheck.min > 0) {
+      seq.add(arrayCheck);
+    }
+    final CheckNumber numberCheck = new CheckNumber();
+    if (schemaJson.has("minimum")) {
+      numberCheck.min = schemaJson.at("minimum").asDouble();
+    }
+    if (schemaJson.has("maximum")) {
+      numberCheck.max = schemaJson.at("maximum").asDouble();
+    }
+    if (schemaJson.has("multipleOf")) {
+      numberCheck.multipleOf = schemaJson.at("multipleOf").asDouble();
+    }
+    if (schemaJson.has("exclusiveMinimum")) {
+      numberCheck.exclusiveMin = schemaJson.at("exclusiveMinimum").asDouble();
+    }
+    if (schemaJson.has("exclusiveMaximum")) {
+      numberCheck.exclusiveMax = schemaJson.at("exclusiveMaximum").asDouble();
+    }
+    if (!Double.isNaN(numberCheck.min) || !Double.isNaN(numberCheck.max) || !Double.isNaN(numberCheck.multipleOf) || !Double.isNaN(numberCheck.exclusiveMin) || !Double.isNaN(numberCheck.exclusiveMax)) {
+      seq.add(numberCheck);
+    }
+
+    final CheckString stringCheck = new CheckString();
+    if (schemaJson.has("minLength")) {
+      stringCheck.min = schemaJson.at("minLength").asInteger();
+    }
+    if (schemaJson.has("maxLength")) {
+      stringCheck.max = schemaJson.at("maxLength").asInteger();
+    }
+    if (schemaJson.has("pattern")) {
+      stringCheck.pattern = Pattern.compile(schemaJson.at("pattern").asString().replace("\\p{Letter}", "\\p{L}").replace("\\p{digit}", "\\p{N}"));
+    }
+    if (stringCheck.min > 0 || stringCheck.max < Integer.MAX_VALUE || stringCheck.pattern != null) {
+      seq.add(stringCheck);
+    }
+    if (schemaJson.has("dependentSchemas")) {
+      for (final Map.Entry<String, Json> e : schemaJson.at("dependentSchemas").asJsonMap().entrySet()) {
+        seq.add(new CheckSchemaDependency(e.getKey(), compile(e.getValue(), ownerSchemaJson, context)));
+      }
+    }
+    if (schemaJson.has("dependentRequired")) {
+      for (final Map.Entry<String, Json> e : schemaJson.at("dependentRequired").asJsonMap().entrySet()) {
+        seq.add(new CheckPropertyDependency(e.getKey(), e.getValue()));
+      }
+    }
+    if (schemaJson.has("dependencies")) {
+      for (final Map.Entry<String, Json> e : schemaJson.at("dependencies").asJsonMap().entrySet()) {
+        if (e.getValue().isArray()) {
+          seq.add(new CheckPropertyDependency(e.getKey(), e.getValue()));
+        } else {
+          seq.add(new CheckSchemaDependency(e.getKey(), compile(e.getValue(), ownerSchemaJson, context)));
+        }
+      }
+    }
+    if (schemaJson.has("unevaluatedItems")) {
+      unevaluatedCheck.unevaluatedSchema = compile(schemaJson.at("unevaluatedItems"), ownerSchemaJson, context);
+    }
+    if (schemaJson.has("ref")) {
+      seq.add(compile(schemaJson.at("ref"), ownerSchemaJson, context));
+    }
+    if (schemaJson.has("$dynamicRef")) {
+      final CompileContext dynamicContext = context.fork();
+      final Json resolvedSchema = context.resolveDynamic(schemaJson.at("$dynamicRef").asString());
+      final Json parentSchemaJson = schemaJson;
+      seq.add(new Instruction() {
+        @Override
+        public Json apply(ValidationContext context, Json json) {
+          return compile(resolvedSchema, ownerSchemaJson, dynamicContext).apply(context, json);
+        }
+      });
+    }
+
+    seq.add(unevaluatedCheck);
+
+    context.endScope();
+
+    return new Instruction() {
+      @Override
+      public Json apply(ValidationContext context, Json json) {
+        final Json beforeActiveSchemaJson = context.activeSchemaJson;
+        final Json beforeOwnerSchemaJson = context.ownerSchemaJson;
+        context.setActiveSchemaJsons(activeSchemaJson, ownerSchemaJson);
+        final Json result = seq.apply(context, json);
+        context.setActiveSchemaJsons(beforeActiveSchemaJson, beforeOwnerSchemaJson);
+        return result;
+      }
+    };
+  }
+
+  private static Json resolveBooleanSchema(Json resolvedRef) {
+    if (resolvedRef != null && resolvedRef.isBoolean()) {
+      if (resolvedRef.asBoolean()) {
+        // always match
+        resolvedRef = Json.object().set("type", "any");
+      } else {
+        // never match
+        resolvedRef = Json.object().set("not", Json.object().set("type", "any"));
+      }
+    }
+    return resolvedRef;
+  }
+
+}
+
+class JsonUriUtils {
+
+  private JsonUriUtils() {
+  }
+
+  public static Optional<String> getPointer(URI uri) {
+    return Optional.ofNullable(uri.getFragment()).filter(JsonUriUtils::isPointer);
+  }
+
+  public static Optional<String> getAnchor(URI uri) {
+    return Optional.ofNullable(uri.getFragment()).filter(not(JsonUriUtils::isPointer));
+  }
+
+  public static URI getSchemaUri(URI uri) {
+    final String uriString = uri.toString();
+    final int index = uriString.indexOf("#");
+    if (index != -1) {
+      return URI.create(uriString.substring(0, index));
+    } else {
+      return uri;
+    }
+  }
+
+  public static boolean isPointer(String fragment) {
+    return fragment.startsWith("/");
+  }
+}
+
+class JsonSchemaImpl implements JsonSchema {
+  private final Json json;
+  private final Instruction start;
+
+  public JsonSchemaImpl(Json json, Instruction start) {
+    this.json = json;
+    this.start = start;
+  }
+
+  @Override
+  public Json validate(Json document) {
+    final Json result = Json.object("ok", true);
+    final Json errors = this.start.apply(new ValidationContext(), document);
+    return errors == null ? result : result.set("errors", errors).set("ok", false);
+  }
+
+  @Override
+  public Json toJson() {
+    return this.json;
+  }
+}
+
+class CompileContext {
+  private final JsonIndex index;
+  private final Deque<URI> scopes;
+  private final Map<Json, Instruction> compiled;
+
+  public CompileContext(JsonIndex index, Deque<URI> scopes, Map<Json, Instruction> compiled) {
+    this.index = index;
+    this.scopes = scopes;
+    this.compiled = compiled;
+  }
+
+  public CompileContext fork() {
+    return new CompileContext(this.index, new LinkedList<>(this.scopes), this.compiled);
+  }
+
+  public Optional<Instruction> getCompiled(Json json) {
+    return Optional.ofNullable(this.compiled.get(json));
+  }
+
+  public void markCompiled(Json json, Instruction instruction) {
+    this.compiled.put(json, instruction);
+  }
+
+  public void startScope(URI uri) {
+    this.scopes.add(uri);
+  }
+
+  public void endScope() {
+    this.scopes.removeLast();
+  }
+
+  public URI getActiveScopeUri() {
+    return this.scopes.getLast();
+  }
+
+  public Json resolveDynamic(String dynamicRef) {
+    return this.scopes.stream().map(scope -> scope.resolve(dynamicRef)).map(this.index::getDynamic).filter(Optional::isPresent).map(Optional::get).findFirst() //
+        .orElseGet(() -> this.scopes.stream().map(scope -> scope.resolve(dynamicRef)).map(this.index::get).filter(Optional::isPresent).map(Optional::get).findFirst().orElseThrow());
+  }
+}
+
+class JsonIndex {
+  private final Map<URI, Json> index;
+  private final Map<URI, Json> dynamicIndex;
+
+  public JsonIndex(Map<URI, Json> index, Map<URI, Json> dynamicIndex) {
+    requireNonNull(index, "'index' is null");
+    requireNonNull(dynamicIndex, "'dynamicIndex' is null");
+    this.index = index;
+    this.dynamicIndex = dynamicIndex;
+  }
+
+  public void add(JsonIndex other) {
+    requireNonNull(other, "'other' is null");
+    this.index.putAll(other.index);
+    this.dynamicIndex.putAll(other.dynamicIndex);
+  }
+
+  public Optional<Json> get(URI uri) {
+    requireNonNull(uri, "'uri' is null");
+    return Optional.ofNullable(this.index.get(uri));
+  }
+
+  public Optional<Json> getDynamic(URI uri) {
+    requireNonNull(uri, "'uri' is null");
+    return Optional.ofNullable(this.dynamicIndex.get(uri));
+  }
+}
+
+@FunctionalInterface
+interface Instruction {
+
+  Json apply(ValidationContext context, Json json);
 
   static Json maybeError(Json errors, Json error) {
     return error == null ? errors : (errors == null ? Json.array() : errors).with(error, new Json[0]);
@@ -53,49 +667,49 @@ public final class JsonSchema implements Json.Schema {
   static class IsObject implements Instruction {
     @Override
     public Json apply(ValidationContext context, Json param) {
-      return param.isObject() ? null : Json.make(param.toString(MAX_CHARACTERS));
+      return param.isObject() ? null : Json.make(param.toString(JsonSchemaConstants.MAX_CHARACTERS));
     }
   }
 
   static class IsArray implements Instruction {
     @Override
     public Json apply(ValidationContext context, Json param) {
-      return param.isArray() ? null : Json.make(param.toString(MAX_CHARACTERS));
+      return param.isArray() ? null : Json.make(param.toString(JsonSchemaConstants.MAX_CHARACTERS));
     }
   }
 
   static class IsString implements Instruction {
     @Override
     public Json apply(ValidationContext context, Json param) {
-      return param.isString() ? null : Json.make(param.toString(MAX_CHARACTERS));
+      return param.isString() ? null : Json.make(param.toString(JsonSchemaConstants.MAX_CHARACTERS));
     }
   }
 
   static class IsBoolean implements Instruction {
     @Override
     public Json apply(ValidationContext context, Json param) {
-      return param.isBoolean() ? null : Json.make(param.toString(MAX_CHARACTERS));
+      return param.isBoolean() ? null : Json.make(param.toString(JsonSchemaConstants.MAX_CHARACTERS));
     }
   }
 
   static class IsNull implements Instruction {
     @Override
     public Json apply(ValidationContext context, Json param) {
-      return param.isNull() ? null : Json.make(param.toString(MAX_CHARACTERS));
+      return param.isNull() ? null : Json.make(param.toString(JsonSchemaConstants.MAX_CHARACTERS));
     }
   }
 
   static class IsNumber implements Instruction {
     @Override
     public Json apply(ValidationContext context, Json param) {
-      return param.isNumber() ? null : Json.make(param.toString(MAX_CHARACTERS));
+      return param.isNumber() ? null : Json.make(param.toString(JsonSchemaConstants.MAX_CHARACTERS));
     }
   }
 
   static class IsInteger implements Instruction {
     @Override
     public Json apply(ValidationContext context, Json param) {
-      return param.isNumber() && ((Number) param.getValue()) instanceof Integer ? null : Json.make(param.toString(MAX_CHARACTERS));
+      return param.isNumber() && ((Number) param.getValue()) instanceof Integer ? null : Json.make(param.toString(JsonSchemaConstants.MAX_CHARACTERS));
     }
   }
 
@@ -112,10 +726,10 @@ public final class JsonSchema implements Json.Schema {
       final String s = param.asString();
       final int size = s.codePointCount(0, s.length());
       if (size < this.min || size > this.max) {
-        errors = maybeError(errors, Json.make("String " + param.toString(MAX_CHARACTERS) + " has length outside of the permitted range [" + this.min + "," + this.max + "]."));
+        errors = maybeError(errors, Json.make("String " + param.toString(JsonSchemaConstants.MAX_CHARACTERS) + " has length outside of the permitted range [" + this.min + "," + this.max + "]."));
       }
       if (this.pattern != null && !this.pattern.matcher(s).find()) {
-        errors = maybeError(errors, Json.make("String " + param.toString(MAX_CHARACTERS) + " does not match regex '" + this.pattern.toString() + "'"));
+        errors = maybeError(errors, Json.make("String " + param.toString(JsonSchemaConstants.MAX_CHARACTERS) + " does not match regex '" + this.pattern.toString() + "'"));
       }
       return errors;
     }
@@ -343,7 +957,7 @@ public final class JsonSchema implements Json.Schema {
         } else if (this.additionalSchema != null) {
           errors = maybeError(errors, this.additionalSchema.apply(context, item));
         } else {
-          errors = maybeError(errors, Json.make("Additional items are not permitted: " + item + " in " + param.toString(MAX_CHARACTERS)));
+          errors = maybeError(errors, Json.make("Additional items are not permitted: " + item + " in " + param.toString(JsonSchemaConstants.MAX_CHARACTERS)));
         }
         if (this.uniqueitems != null && this.uniqueitems && param.asJsonList().lastIndexOf(item) > i) {
           errors = maybeError(errors, Json.make("Element " + item + " is duplicate in array."));
@@ -365,7 +979,7 @@ public final class JsonSchema implements Json.Schema {
         errors = maybeError(errors, Json.make(format("Array requires minimum %s matches", this.minContains)));
       }
       if (size < this.min || size > this.max) {
-        errors = maybeError(errors, Json.make("Array  " + param.toString(MAX_CHARACTERS) + " has number of elements outside of the permitted range [" + this.min + "," + this.max + "]."));
+        errors = maybeError(errors, Json.make("Array  " + param.toString(JsonSchemaConstants.MAX_CHARACTERS) + " has number of elements outside of the permitted range [" + this.min + "," + this.max + "]."));
       }
       if (errors == null) {
         context.markEvaluated(param, evaluated);
@@ -389,7 +1003,7 @@ public final class JsonSchema implements Json.Schema {
       if (param.has(this.propname)) {
         return null;
       } else {
-        return Json.array().add(Json.make("Required property " + this.propname + " missing from object " + param.toString(MAX_CHARACTERS)));
+        return Json.array().add(Json.make("Required property " + this.propname + " missing from object " + param.toString(JsonSchemaConstants.MAX_CHARACTERS)));
       }
     }
   }
@@ -446,10 +1060,10 @@ public final class JsonSchema implements Json.Schema {
         }
       }
       if (param.asJsonMap().size() < this.min) {
-        errors = maybeError(errors, Json.make("Object " + param.toString(MAX_CHARACTERS) + " has fewer than the permitted " + this.min + "  number of properties."));
+        errors = maybeError(errors, Json.make("Object " + param.toString(JsonSchemaConstants.MAX_CHARACTERS) + " has fewer than the permitted " + this.min + "  number of properties."));
       }
       if (param.asJsonMap().size() > this.max) {
-        errors = maybeError(errors, Json.make("Object " + param.toString(MAX_CHARACTERS) + " has more than the permitted " + this.min + "  number of properties."));
+        errors = maybeError(errors, Json.make("Object " + param.toString(JsonSchemaConstants.MAX_CHARACTERS) + " has more than the permitted " + this.min + "  number of properties."));
       }
 
       if (errors == null) {
@@ -524,7 +1138,7 @@ public final class JsonSchema implements Json.Schema {
           return null;
         }
       }
-      return Json.array().add(Json.make("Type mistmatch for " + param.toString(MAX_CHARACTERS) + ", allowed types: " + this.types));
+      return Json.array().add(Json.make("Type mistmatch for " + param.toString(JsonSchemaConstants.MAX_CHARACTERS) + ", allowed types: " + this.types));
     }
   }
 
@@ -542,7 +1156,7 @@ public final class JsonSchema implements Json.Schema {
           return null;
         }
       }
-      return Json.array().add("Element " + param.toString(MAX_CHARACTERS) + " doesn't match any of enumerated possibilities " + this.theenum);
+      return Json.array().add("Element " + param.toString(JsonSchemaConstants.MAX_CHARACTERS) + " doesn't match any of enumerated possibilities " + this.theenum);
     }
   }
 
@@ -555,7 +1169,7 @@ public final class JsonSchema implements Json.Schema {
 
     @Override
     public Json apply(ValidationContext context, Json param) {
-      return param.equals(this.value) ? null : Json.array().add("Element " + param.toString(MAX_CHARACTERS) + " is not equal " + param.toString(MAX_CHARACTERS));
+      return param.equals(this.value) ? null : Json.array().add("Element " + param.toString(JsonSchemaConstants.MAX_CHARACTERS) + " is not equal " + param.toString(JsonSchemaConstants.MAX_CHARACTERS));
     }
   }
 
@@ -574,7 +1188,7 @@ public final class JsonSchema implements Json.Schema {
       if (any) {
         return null;
       }
-      return Json.array().add("Element " + param.toString(MAX_CHARACTERS) + " must conform to at least one of available sub-schemas " + this.schema.toString(MAX_CHARACTERS));
+      return Json.array().add("Element " + param.toString(JsonSchemaConstants.MAX_CHARACTERS) + " must conform to at least one of available sub-schemas " + this.schema.toString(JsonSchemaConstants.MAX_CHARACTERS));
     }
   }
 
@@ -595,7 +1209,7 @@ public final class JsonSchema implements Json.Schema {
         }
       }
       if (matches != 1) {
-        return Json.array().add("Element " + param.toString(MAX_CHARACTERS) + " must conform to exactly one of available sub-schemas, but not more " + this.schema.toString(MAX_CHARACTERS)).add(errors);
+        return Json.array().add("Element " + param.toString(JsonSchemaConstants.MAX_CHARACTERS) + " must conform to exactly one of available sub-schemas, but not more " + this.schema.toString(JsonSchemaConstants.MAX_CHARACTERS)).add(errors);
       } else {
         return null;
       }
@@ -616,7 +1230,7 @@ public final class JsonSchema implements Json.Schema {
       if (this.I.apply(context, param) != null) {
         return null;
       } else {
-        return Json.array().add("Element " + param.toString(MAX_CHARACTERS) + " must NOT conform to the schema " + this.schema.toString(MAX_CHARACTERS));
+        return Json.array().add("Element " + param.toString(JsonSchemaConstants.MAX_CHARACTERS) + " must NOT conform to the schema " + this.schema.toString(JsonSchemaConstants.MAX_CHARACTERS));
       }
     }
   }
@@ -662,17 +1276,21 @@ public final class JsonSchema implements Json.Schema {
         Json errors = null;
         for (final Json p : this.required.asJsonList()) {
           if (!param.has(p.asString())) {
-            errors = maybeError(errors, Json.make("Conditionally required property " + p + " missing from object " + param.toString(MAX_CHARACTERS)));
+            errors = maybeError(errors, Json.make("Conditionally required property " + p + " missing from object " + param.toString(JsonSchemaConstants.MAX_CHARACTERS)));
           }
         }
         return errors;
       }
     }
   }
+}
+
+final class JsonSchemaConstants {
+  public static final int MAX_CHARACTERS = 200;
 
   // https://github.com/ajv-validator/ajv-formats/blob/master/src/formats.ts
   // https://github.com/eclipse-vertx/vertx-json-schema/blob/135da5046be5538365bcf4090e2b8ba07a129838/src/main/java/io/vertx/json/schema/common/RegularExpressions.java
-  private static final Map<String, Pattern> PATTERN_BY_FORMAT;
+  public static final Map<String, Pattern> PATTERN_BY_FORMAT;
   static {
     PATTERN_BY_FORMAT = new HashMap<>();
     PATTERN_BY_FORMAT.put("date-time", Pattern.compile("^(?:[1-9]\\d{3}-(?:(?:0[1-9]|1[0-2])-(?:0[1-9]|1\\d|2[0-8])|(?:0[13-9]|1[0-2])-(?:29|30)|(?:0[13578]|1[02])-31)|(?:[1-9]\\d(?:0[48]|[2468][048]|[13579][26])|(?:[2468][048]|[13579][26])00)-02-29)T(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:Z|[+-][01]\\d:[0-5]\\d)$"));
@@ -690,570 +1308,5 @@ public final class JsonSchema implements Json.Schema {
 
     PATTERN_BY_FORMAT.put("relative-json-pointer", Pattern.compile("^(([1-9]+0*)+|0{1})(\\/[\\/\\w]*)*#{0,1}$"));
     PATTERN_BY_FORMAT.put("json-pointer", Pattern.compile("^(?:\\/(?:[^~/]|~0|~1)*)*$"));
-  }
-
-  private final Json json;
-  private final Instruction start;
-
-  private JsonSchema(Json json, Instruction start) {
-    this.json = json;
-    this.start = start;
-  }
-
-  @Override
-  public Json validate(Json document) {
-    final Json result = Json.object("ok", true);
-    final Json errors = this.start.apply(new ValidationContext(), document);
-    return errors == null ? result : result.set("errors", errors).set("ok", false);
-  }
-
-  @Override
-  public Json toJson() {
-    return this.json;
-  }
-
-  public static JsonSchema initialize(Json json) {
-    final URI rootUri = URI.create("http://__default__.nix");
-    final JsonIndex index = index(json, rootUri);
-    resolveRefs(0, "root", json, rootUri, index, new IdentityHashMap<>());
-    final Deque<URI> scopes = new LinkedList<>();
-    scopes.add(rootUri);
-    return new JsonSchema(json, compile(json, json, new CompileContext(index, scopes, new IdentityHashMap<>())));
-  }
-
-  private static JsonIndex index(Json json, URI rootUri) {
-    final Map<URI, Json> index = new HashMap<>();
-    index.put(rootUri, json);
-    index.put(rootUri.resolve("#"), json);
-    final Map<URI, Json> dynamicIndex = new HashMap<>();
-    initIndex(0, "root", index, dynamicIndex, json, rootUri, new IdentityHashMap<>());
-    return new JsonIndex(index, dynamicIndex);
-  }
-
-  private static void initIndex(int level, String field, Map<URI, Json> index, Map<URI, Json> dynamicIndex, Json json, URI uri, Map<Json, Json> alreadyIndexed) {
-    System.out.println("<i>" + "-".repeat(level * 2) + field);
-    if (alreadyIndexed.containsKey(json)) {
-      // Already indexed
-      return;
-    } else {
-      // Mark already indexed
-      alreadyIndexed.put(json, json);
-    }
-    if (json.isObject()) {
-      if (json.has("$id") && !field.equals("properties")) {
-        final String id = json.at("$id").asString();
-        uri = resolveUri(uri, id);
-        System.out.println("index " + uri.toString());
-        index.put(uri, json);
-      }
-      if (json.has("$anchor") && !field.equals("properties")) {
-        final String anchor = json.at("$anchor").asString();
-        final URI anchorUri = resolveUri(uri, "#" + anchor);
-        System.out.println("index " + anchorUri.toString());
-        index.put(anchorUri, json);
-      }
-      if (json.has("$dynamicAnchor") && !field.equals("properties")) {
-        final String dynamicAnchor = json.at("$dynamicAnchor").asString();
-        final URI dynamicAnchorUri = resolveUri(uri, "#" + dynamicAnchor);
-        System.out.println("index dynamic " + dynamicAnchorUri.toString());
-        dynamicIndex.put(dynamicAnchorUri, json);
-        System.out.println("index " + dynamicAnchorUri.toString());
-        index.put(dynamicAnchorUri, json);
-      }
-      for (final Entry<String, Json> entry : json.asJsonMap().entrySet()) {
-        initIndex(level + 1, entry.getKey(), index, dynamicIndex, entry.getValue(), uri, alreadyIndexed);
-      }
-    } else if (json.isArray()) {
-      for (final Json item : json.asJsonList()) {
-        initIndex(level + 1, "[]", index, dynamicIndex, item, uri, alreadyIndexed);
-      }
-    }
-  }
-
-  static URI resolveUri(URI uri, String sub) {
-    if (uri.getScheme() != null && uri.getScheme().equals("urn") && sub.startsWith("#")) {
-      return URI.create(uri.toString() + sub);
-    } else {
-      System.out.println("resolve " + uri + " with " + sub + " = " + uri.resolve(sub));
-      return uri.resolve(sub);
-    }
-  }
-
-  private static void resolveRefs(int level, String field, Json json, URI uri, JsonIndex index, Map<Json, Json> alreadyResolved) {
-    System.out.println("<r>" + "-".repeat(level * 2) + field);
-    if (alreadyResolved.containsKey(json)) {
-      // Already resolved
-      return;
-    } else {
-      // Mark already resolved
-      alreadyResolved.put(json, json);
-    }
-    if (json.isObject()) {
-      if (json.has("$id") && !field.equals("properties")) {
-        final String id = json.at("$id").asString();
-        uri = resolveUri(uri, id);
-      }
-      if (json.has("$ref") && !field.equals("properties")) {
-        final String ref = json.at("$ref").asString();
-        json.delAt("$ref"); // mark as resolved
-        final URI refUri = resolveUri(uri, ref);
-        final Json resolved = resolve(index, refUri);
-        resolveRefs(level + 1, "$ref", resolved, refUri, index, alreadyResolved);
-        json.set("ref", resolved);
-      }
-      for (final Entry<String, Json> entry : json.asJsonMap().entrySet()) {
-        resolveRefs(level + 1, entry.getKey(), entry.getValue(), uri, index, alreadyResolved);
-      }
-    } else if (json.isArray()) {
-      for (final Json item : json.asJsonList()) {
-        resolveRefs(level + 1, "[]", item, uri, index, alreadyResolved);
-      }
-    }
-  }
-
-  public static Json resolve(JsonIndex index, URI uri) {
-    requireNonNull(index, "'index' is null");
-    requireNonNull(uri, "'uri' is null");
-    return JsonUriUtils.getPointer(uri).map(pointer -> {
-      return resolvePointer(resolveInIndex(index, JsonUriUtils.getSchemaUri(uri)), pointer);
-    }).or(() -> JsonUriUtils.getAnchor(uri).map(anchor -> {
-      return resolveInIndex(index, uri);
-    })).or(() -> {
-      return Optional.of(resolveInIndex(index, JsonUriUtils.getSchemaUri(uri)));
-    }).orElseThrow(() -> new RuntimeException(format("Failed to resolve '%s'. Not found.", uri)));
-  }
-
-  private static Json resolveInIndex(JsonIndex index, URI uri) {
-    requireNonNull(index, "'index' is null");
-    requireNonNull(uri, "'uri' is null");
-    return index.get(uri).orElseGet(() -> {
-      try {
-        System.out.println("fetch from " + JsonUriUtils.getSchemaUri(uri).toString());
-        final Json fetchedJson = Json.read(JsonUriUtils.getSchemaUri(uri).toURL());
-        index.add(index(fetchedJson, JsonUriUtils.getSchemaUri(uri)));
-        return fetchedJson;
-      } catch (final MalformedURLException exception) {
-        throw new RuntimeException(format("Invalid url: " + uri, exception));
-      }
-    });
-  }
-
-  private static Json resolvePointer(Json json, String pointer) {
-    requireNonNull(json, "'json' is null");
-    requireNonNull(pointer, "'pointer' is null");
-    if (pointer.isBlank()) {
-      return json;
-    }
-    final String[] steps = pointer.split("/");
-    Json result = json;
-    for (final String step : steps) {
-      if (step.isBlank()) {
-        continue;
-      }
-      result = getAt(result, step.replace("~1", "/").replace("~0", "~"));
-    }
-    return result;
-  }
-
-  private static Json getAt(Json json, String at) {
-    requireNonNull(json, format("Try to get at '%s' on null object", at));
-    requireNonNull(at, "'at' is null");
-    if (json.isArray()) {
-      return json.at(parseInt(at));
-    } else if (json.isObject()) {
-      return json.at(at);
-    } else {
-      throw new RuntimeException(format("Can't resolve at '%s' in document '%s'", at, json.toString(200)));
-    }
-  }
-
-  static Instruction compile(Json schemaJson, Json ownerSchemaJson, CompileContext context) {
-    schemaJson = resolveBooleanSchema(schemaJson);
-    final Json activeSchemaJson = schemaJson;
-
-    final Optional<Instruction> compiledOptional = context.getCompiled(schemaJson);
-    if (compiledOptional.isPresent()) {
-      return compiledOptional.get();
-    }
-    final Sequence seq = new Sequence();
-    context.markCompiled(schemaJson, seq);
-
-    URI uri;
-    if (schemaJson.has("$id")) {
-      final String id = schemaJson.at("$id").asString();
-      uri = resolveUri(context.getActiveScopeUri(), id);
-    } else {
-      uri = context.getActiveScopeUri();
-    }
-    context.startScope(uri);
-
-    if (schemaJson.has("type") && !schemaJson.is("type", "any")) {
-      seq.add(new CheckType(schemaJson.at("type").isString() ? Json.array().add(schemaJson.at("type")) : schemaJson.at("type")));
-    }
-    if (schemaJson.has("format")) {
-      final Pattern pattern = PATTERN_BY_FORMAT.get(schemaJson.at("format").asString());
-      if (pattern != null) {
-        final CheckString checkString = new CheckString();
-        checkString.pattern = pattern;
-        seq.add(checkString);
-      } else {
-        if (schemaJson.is("format", "uri")) {
-          seq.add((evaluationContext, json) -> {
-            if (!json.isString()) {
-              return null;
-            }
-            try {
-              URI.create(json.asString());
-              return null;
-            } catch (final IllegalArgumentException e) {
-              return Json.array().add("Element " + json.toString(MAX_CHARACTERS) + " is not a valid uri");
-            }
-          });
-        } else if (schemaJson.is("format", "idn-hostname")) {
-          seq.add((evaluationContext, json) -> {
-            if (!json.isString()) {
-              return null;
-            }
-            try {
-              IDN.toASCII(json.asString());
-              return null;
-            } catch (final IllegalArgumentException e) {
-              return Json.array().add("Element " + json.toString(MAX_CHARACTERS) + " is not a valid idn hostname");
-            }
-          });
-        } else if (schemaJson.is("format", "uri-reference")) {
-          seq.add((evaluationContext, json) -> {
-            if (!json.isString()) {
-              return null;
-            }
-            try {
-              URI.create(json.asString());
-              return null;
-            } catch (final IllegalArgumentException e) {
-              return Json.array().add("Element " + json.toString(MAX_CHARACTERS) + " is not a valid uri reference");
-            }
-          });
-        }
-      }
-    }
-    if (schemaJson.has("const")) {
-      seq.add(new CheckEquals(schemaJson.at("const")));
-    }
-    if (schemaJson.has("enum")) {
-      seq.add(new CheckEnum(schemaJson.at("enum")));
-    }
-    if (schemaJson.has("allOf")) {
-      final Sequence sub = new Sequence();
-      for (final Json allOfSchemaJson : schemaJson.at("allOf").asJsonList()) {
-        sub.add(compile(allOfSchemaJson, ownerSchemaJson, context));
-      }
-      seq.add(sub);
-    }
-    if (schemaJson.has("anyOf")) {
-      final CheckAny any = new CheckAny();
-      any.schema = schemaJson.at("anyOf");
-      for (final Json anySchemaJson : any.schema.asJsonList()) {
-        any.alternates.add(compile(anySchemaJson, ownerSchemaJson, context));
-      }
-      seq.add(any);
-    }
-    if (schemaJson.has("oneOf")) {
-      final CheckOne any = new CheckOne();
-      any.schema = schemaJson.at("oneOf");
-      for (final Json oneOfSchemaJson : any.schema.asJsonList()) {
-        any.alternates.add(compile(oneOfSchemaJson, ownerSchemaJson, context));
-      }
-      seq.add(any);
-    }
-    if (schemaJson.has("not")) {
-      final Json notSchemaJson = schemaJson.at("not");
-      seq.add(new CheckNot(compile(notSchemaJson, schemaJson, context), schemaJson.at("not")));
-    }
-
-    if (schemaJson.has("required") && schemaJson.at("required").isArray()) {
-      for (final Json p : schemaJson.at("required").asJsonList()) {
-        seq.add(new CheckPropertyPresent(p.asString()));
-      }
-    }
-    final CheckObject objectCheck = new CheckObject();
-    if (schemaJson.has("properties")) {
-      for (final Map.Entry<String, Json> p : schemaJson.at("properties").asJsonMap().entrySet()) {
-        objectCheck.props.add(new CheckObject.CheckProperty(p.getKey(), compile(p.getValue(), ownerSchemaJson, context)));
-      }
-    }
-    if (schemaJson.has("patternProperties")) {
-      for (final Map.Entry<String, Json> p : schemaJson.at("patternProperties").asJsonMap().entrySet()) {
-        objectCheck.patternProps.add(new CheckObject.CheckPatternProperty(p.getKey(), compile(p.getValue(), ownerSchemaJson, context)));
-      }
-    }
-    if (schemaJson.has("additionalProperties")) {
-      objectCheck.additionalSchema = compile(schemaJson.at("additionalProperties"), ownerSchemaJson, context);
-    }
-    final CheckUnevaluatedProperties unevaluatedCheck = new CheckUnevaluatedProperties();
-    if (schemaJson.has("unevaluatedProperties")) {
-      unevaluatedCheck.unevaluatedSchema = compile(schemaJson.at("unevaluatedProperties"), ownerSchemaJson, context);
-    }
-    if (schemaJson.has("minProperties")) {
-      objectCheck.min = schemaJson.at("minProperties").asInteger();
-    }
-    if (schemaJson.has("maxProperties")) {
-      objectCheck.max = schemaJson.at("maxProperties").asInteger();
-    }
-    if (schemaJson.has("propertyNames")) {
-      objectCheck.propertyNames = compile(schemaJson.at("propertyNames"), ownerSchemaJson, context);
-    }
-
-    if (!objectCheck.props.isEmpty() || !objectCheck.patternProps.isEmpty() || objectCheck.additionalSchema != any || objectCheck.min > 0 || objectCheck.max < Integer.MAX_VALUE || objectCheck.propertyNames != null) {
-      seq.add(objectCheck);
-    }
-
-    if (schemaJson.has("if")) {
-      final CheckIfThenElse checkIfThenElse = new CheckIfThenElse();
-      checkIfThenElse.ifInstruction = compile(schemaJson.at("if"), ownerSchemaJson, context);
-      checkIfThenElse.thenInstruction = schemaJson.has("then") ? compile(schemaJson.at("then"), ownerSchemaJson, context) : null;
-      checkIfThenElse.elseInstruction = schemaJson.has("else") ? compile(schemaJson.at("else"), ownerSchemaJson, context) : null;
-      seq.add(checkIfThenElse);
-    }
-
-    final CheckArray arrayCheck = new CheckArray();
-    if (schemaJson.has("prefixItems")) {
-      if (schemaJson.at("prefixItems").isObject()) {
-        arrayCheck.prefixSchema = compile(schemaJson.at("prefixItems"), ownerSchemaJson, context);
-      } else {
-        arrayCheck.prefixSchemas = new ArrayList<>();
-        for (final Json prefixItemSchemaJson : schemaJson.at("prefixItems").asJsonList()) {
-          arrayCheck.prefixSchemas.add(compile(prefixItemSchemaJson, ownerSchemaJson, context));
-        }
-      }
-    }
-    if (schemaJson.has("additionalItems")) {
-      arrayCheck.additionalSchema = compile(schemaJson.at("additionalItems"), ownerSchemaJson, context);
-    }
-    if (schemaJson.has("items")) {
-      if (schemaJson.at("items").isObject() || schemaJson.is("items", true)) {
-        arrayCheck.schema = compile(schemaJson.at("items"), ownerSchemaJson, context);
-      } else if (!schemaJson.at("items").asBoolean()) {
-        arrayCheck.additionalSchema = null;
-        if (arrayCheck.schema == null && arrayCheck.prefixSchemas == null && arrayCheck.prefixSchema == null) {
-          arrayCheck.schema = never;
-        }
-      }
-    }
-    if (schemaJson.has("uniqueItems")) {
-      arrayCheck.uniqueitems = schemaJson.at("uniqueItems").asBoolean();
-    }
-    if (schemaJson.has("minItems")) {
-      arrayCheck.min = schemaJson.at("minItems").asInteger();
-    }
-    if (schemaJson.has("maxItems")) {
-      arrayCheck.max = schemaJson.at("maxItems").asInteger();
-    }
-    if (schemaJson.has("contains")) {
-      arrayCheck.contains = compile(schemaJson.at("contains"), ownerSchemaJson, context);
-    }
-    if (schemaJson.has("minContains")) {
-      arrayCheck.minContains = schemaJson.at("minContains").asInteger();
-    }
-    if (schemaJson.has("maxContains")) {
-      arrayCheck.maxContains = schemaJson.at("maxContains").asInteger();
-    }
-    if (arrayCheck.contains != null || arrayCheck.schema != null || arrayCheck.prefixSchemas != null || arrayCheck.additionalSchema != any || arrayCheck.uniqueitems != null || arrayCheck.max < Integer.MAX_VALUE || arrayCheck.min > 0) {
-      seq.add(arrayCheck);
-    }
-    final CheckNumber numberCheck = new CheckNumber();
-    if (schemaJson.has("minimum")) {
-      numberCheck.min = schemaJson.at("minimum").asDouble();
-    }
-    if (schemaJson.has("maximum")) {
-      numberCheck.max = schemaJson.at("maximum").asDouble();
-    }
-    if (schemaJson.has("multipleOf")) {
-      numberCheck.multipleOf = schemaJson.at("multipleOf").asDouble();
-    }
-    if (schemaJson.has("exclusiveMinimum")) {
-      numberCheck.exclusiveMin = schemaJson.at("exclusiveMinimum").asDouble();
-    }
-    if (schemaJson.has("exclusiveMaximum")) {
-      numberCheck.exclusiveMax = schemaJson.at("exclusiveMaximum").asDouble();
-    }
-    if (!Double.isNaN(numberCheck.min) || !Double.isNaN(numberCheck.max) || !Double.isNaN(numberCheck.multipleOf) || !Double.isNaN(numberCheck.exclusiveMin) || !Double.isNaN(numberCheck.exclusiveMax)) {
-      seq.add(numberCheck);
-    }
-
-    final CheckString stringCheck = new CheckString();
-    if (schemaJson.has("minLength")) {
-      stringCheck.min = schemaJson.at("minLength").asInteger();
-    }
-    if (schemaJson.has("maxLength")) {
-      stringCheck.max = schemaJson.at("maxLength").asInteger();
-    }
-    if (schemaJson.has("pattern")) {
-      stringCheck.pattern = Pattern.compile(schemaJson.at("pattern").asString().replace("\\p{Letter}", "\\p{L}").replace("\\p{digit}", "\\p{N}"));
-    }
-    if (stringCheck.min > 0 || stringCheck.max < Integer.MAX_VALUE || stringCheck.pattern != null) {
-      seq.add(stringCheck);
-    }
-    if (schemaJson.has("dependentSchemas")) {
-      for (final Map.Entry<String, Json> e : schemaJson.at("dependentSchemas").asJsonMap().entrySet()) {
-        seq.add(new CheckSchemaDependency(e.getKey(), compile(e.getValue(), ownerSchemaJson, context)));
-      }
-    }
-    if (schemaJson.has("dependentRequired")) {
-      for (final Map.Entry<String, Json> e : schemaJson.at("dependentRequired").asJsonMap().entrySet()) {
-        seq.add(new CheckPropertyDependency(e.getKey(), e.getValue()));
-      }
-    }
-    if (schemaJson.has("dependencies")) {
-      for (final Map.Entry<String, Json> e : schemaJson.at("dependencies").asJsonMap().entrySet()) {
-        if (e.getValue().isArray()) {
-          seq.add(new CheckPropertyDependency(e.getKey(), e.getValue()));
-        } else {
-          seq.add(new CheckSchemaDependency(e.getKey(), compile(e.getValue(), ownerSchemaJson, context)));
-        }
-      }
-    }
-    if (schemaJson.has("unevaluatedItems")) {
-      unevaluatedCheck.unevaluatedSchema = compile(schemaJson.at("unevaluatedItems"), ownerSchemaJson, context);
-    }
-    if (schemaJson.has("ref")) {
-      seq.add(compile(schemaJson.at("ref"), ownerSchemaJson, context));
-    }
-    if (schemaJson.has("$dynamicRef")) {
-      final CompileContext dynamicContext = context.fork();
-      final Json resolvedSchema = context.resolveDynamic(schemaJson.at("$dynamicRef").asString());
-      final Json parentSchemaJson = schemaJson;
-      seq.add(new Instruction() {
-        @Override
-        public Json apply(ValidationContext context, Json json) {
-          return compile(resolvedSchema, ownerSchemaJson, dynamicContext).apply(context, json);
-        }
-      });
-    }
-
-    seq.add(unevaluatedCheck);
-
-    context.endScope();
-
-    return new Instruction() {
-      @Override
-      public Json apply(ValidationContext context, Json json) {
-        final Json beforeActiveSchemaJson = context.activeSchemaJson;
-        final Json beforeOwnerSchemaJson = context.ownerSchemaJson;
-        context.setActiveSchemaJsons(activeSchemaJson, ownerSchemaJson);
-        final Json result = seq.apply(context, json);
-        context.setActiveSchemaJsons(beforeActiveSchemaJson, beforeOwnerSchemaJson);
-        return result;
-      }
-    };
-  }
-
-  private static Json resolveBooleanSchema(Json resolvedRef) {
-    if (resolvedRef != null && resolvedRef.isBoolean()) {
-      if (resolvedRef.asBoolean()) {
-        // always match
-        resolvedRef = Json.object().set("type", "any");
-      } else {
-        // never match
-        resolvedRef = Json.object().set("not", Json.object().set("type", "any"));
-      }
-    }
-    return resolvedRef;
-  }
-
-  private static class JsonUriUtils {
-
-    private JsonUriUtils() {
-    }
-
-    public static Optional<String> getPointer(URI uri) {
-      return Optional.ofNullable(uri.getFragment()).filter(JsonUriUtils::isPointer);
-    }
-
-    public static Optional<String> getAnchor(URI uri) {
-      return Optional.ofNullable(uri.getFragment()).filter(not(JsonUriUtils::isPointer));
-    }
-
-    public static URI getSchemaUri(URI uri) {
-      final String uriString = uri.toString();
-      final int index = uriString.indexOf("#");
-      if (index != -1) {
-        return URI.create(uriString.substring(0, index));
-      } else {
-        return uri;
-      }
-    }
-
-    public static boolean isPointer(String fragment) {
-      return fragment.startsWith("/");
-    }
-  }
-
-  private static class CompileContext {
-    private final JsonIndex index;
-    private final Deque<URI> scopes;
-    private final Map<Json, Instruction> compiled;
-
-    public CompileContext(JsonIndex index, Deque<URI> scopes, Map<Json, Instruction> compiled) {
-      this.index = index;
-      this.scopes = scopes;
-      this.compiled = compiled;
-    }
-
-    public CompileContext fork() {
-      return new CompileContext(this.index, new LinkedList<>(this.scopes), this.compiled);
-    }
-
-    public Optional<Instruction> getCompiled(Json json) {
-      return Optional.ofNullable(this.compiled.get(json));
-    }
-
-    public void markCompiled(Json json, Instruction instruction) {
-      this.compiled.put(json, instruction);
-    }
-
-    public void startScope(URI uri) {
-      this.scopes.add(uri);
-    }
-
-    public void endScope() {
-      this.scopes.removeLast();
-    }
-
-    public URI getActiveScopeUri() {
-      return this.scopes.getLast();
-    }
-
-    public Json resolveDynamic(String dynamicRef) {
-      return this.scopes.stream().map(scope -> scope.resolve(dynamicRef)).map(this.index::getDynamic).filter(Optional::isPresent).map(Optional::get).findFirst() //
-          .orElseGet(() -> this.scopes.stream().map(scope -> scope.resolve(dynamicRef)).map(this.index::get).filter(Optional::isPresent).map(Optional::get).findFirst().orElseThrow());
-    }
-  }
-
-  private static class JsonIndex {
-    private final Map<URI, Json> index;
-    private final Map<URI, Json> dynamicIndex;
-
-    public JsonIndex(Map<URI, Json> index, Map<URI, Json> dynamicIndex) {
-      requireNonNull(index, "'index' is null");
-      requireNonNull(dynamicIndex, "'dynamicIndex' is null");
-      this.index = index;
-      this.dynamicIndex = dynamicIndex;
-    }
-
-    public void add(JsonIndex other) {
-      requireNonNull(other, "'other' is null");
-      this.index.putAll(other.index);
-      this.dynamicIndex.putAll(other.dynamicIndex);
-    }
-
-    public Optional<Json> get(URI uri) {
-      requireNonNull(uri, "'uri' is null");
-      return Optional.ofNullable(this.index.get(uri));
-    }
-
-    public Optional<Json> getDynamic(URI uri) {
-      requireNonNull(uri, "'uri' is null");
-      return Optional.ofNullable(this.dynamicIndex.get(uri));
-    }
   }
 }

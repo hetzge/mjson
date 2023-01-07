@@ -45,7 +45,7 @@ public class TestJsonSchemaSuite {
   @ParameterizedTest(name = "{1}")
   @MethodSource("data")
   public void doTest(String group, String description, Json one, Json test) {
-    final Json.Schema schema = JsonSchema.initialize(one.at("schema"));
+    final JsonSchema schema = JsonSchema.initialize(one.at("schema"));
     final Json data = test.at("data");
     final boolean valid = test.at("valid", true).asBoolean();
     final Json result = schema.validate(data);
